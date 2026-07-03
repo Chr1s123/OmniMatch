@@ -44,6 +44,50 @@ class ShoppingSummary(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ShoppingIntent(BaseModel):
+    original_query: str
+    category: str
+    budget: float | None = None
+    preferences: list[str] = Field(default_factory=list)
+    negative_constraints: list[str] = Field(default_factory=list)
+    destination: str | None = None
+
+
+class ProductCandidate(BaseModel):
+    id: str
+    platform: str
+    title: str
+    price: float = Field(..., ge=0)
+    currency: str = "CNY"
+    shipping: float = Field(default=0, ge=0)
+    tax: float = Field(default=0, ge=0)
+    rating: float = Field(default=0, ge=0, le=5)
+    url: str
+    material: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def total_landed_cost(self) -> float:
+        return round(self.price + self.shipping + self.tax, 2)
+
+
+class CandidateScore(BaseModel):
+    total: float
+    constraint_score: float
+    evidence_score: float
+    price_score: float
+    preference_score: float
+    risk_penalty: float
+    total_landed_cost: float
+    rejection_reasons: list[str] = Field(default_factory=list)
+
+
+class ScoredProduct(BaseModel):
+    candidate: ProductCandidate
+    score: CandidateScore
+
+
 class AgentEvent(BaseModel):
     type: str
     thread_id: str
