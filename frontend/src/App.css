@@ -102,7 +102,10 @@ button:disabled {
 .status-row,
 .price-row,
 .trace-stats,
-.event-meta {
+.event-meta,
+.provider-meta,
+.observability-grid,
+.trace-paths {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -110,10 +113,32 @@ button:disabled {
   font-size: 14px;
 }
 
+.observability-grid {
+  gap: 8px;
+}
+
+.observability-grid span,
+.trace-paths span,
+.provider-meta span {
+  border-radius: 6px;
+  background: #f1f5f7;
+  padding: 4px 8px;
+}
+
 .error-box {
   border-left: 4px solid #c0392b;
   background: #fff1ef;
   padding: 12px;
+}
+
+.warning-box {
+  border-left: 4px solid #b7791f;
+  background: #fff8e8;
+  padding: 12px;
+}
+
+.warning-box p {
+  margin-bottom: 4px;
 }
 
 .summary-message {
@@ -136,6 +161,10 @@ button:disabled {
   color: #146c5c;
   font-size: 13px;
   font-weight: 700;
+}
+
+.trace-paths {
+  margin-top: 16px;
 }
 
 .empty-state {
@@ -177,6 +206,15 @@ button:disabled {
   background: #edf3f1;
   color: #24594f;
   padding: 3px 8px;
+}
+
+.provider-meta {
+  margin-top: 8px;
+}
+
+.provider-meta span {
+  background: #eef2ff;
+  color: #334155;
 }
 
 @media (max-width: 900px) {
