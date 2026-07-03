@@ -30,21 +30,24 @@ class OmniMatchSettings:
 
     @classmethod
     def from_env(cls) -> "OmniMatchSettings":
+        process_env = dict(os.environ)
         load_dotenv()
-        profile = os.getenv("OMNIMATCH_PROFILE", "dev")
+        profile = process_env.get("OMNIMATCH_PROFILE") or os.getenv("OMNIMATCH_PROFILE", "dev")
         if profile not in {"dev", "submission", "test"}:
             raise ConfigError("OMNIMATCH_PROFILE must be dev, submission, or test")
 
         if profile == "submission":
             settings = cls(
                 profile="submission",
-                llm_provider="placeholder",
-                llm_model=os.getenv("OMNIMATCH_LLM_MODEL", "placeholder-llm"),
-                product_provider="placeholder",
-                web_search_provider="placeholder",
-                shipping_provider="placeholder",
-                memory_provider="placeholder",
-                eval_provider="placeholder",
+                llm_provider=process_env.get("OMNIMATCH_LLM_PROVIDER", "placeholder"),
+                llm_model=process_env.get("OMNIMATCH_LLM_MODEL", "placeholder-llm"),
+                product_provider=process_env.get("OMNIMATCH_PRODUCT_PROVIDER", "placeholder"),
+                web_search_provider=process_env.get("OMNIMATCH_WEB_SEARCH_PROVIDER", "placeholder"),
+                shipping_provider=process_env.get("OMNIMATCH_SHIPPING_PROVIDER", "placeholder"),
+                memory_provider=process_env.get("OMNIMATCH_MEMORY_PROVIDER", "placeholder"),
+                eval_provider=process_env.get("OMNIMATCH_EVAL_PROVIDER", "placeholder"),
+                product_api_url=os.getenv("OMNIMATCH_PRODUCT_API_URL"),
+                web_search_api_url=os.getenv("OMNIMATCH_WEB_SEARCH_API_URL"),
             )
         elif profile == "test":
             settings = cls(
@@ -59,11 +62,11 @@ class OmniMatchSettings:
             )
         else:
             settings = cls(
-                profile="dev",
+                profile=profile,
                 llm_provider=os.getenv("OMNIMATCH_LLM_PROVIDER", "openai"),
                 llm_model=os.getenv("OMNIMATCH_LLM_MODEL", "gpt-4.1-mini"),
-                product_provider=os.getenv("OMNIMATCH_PRODUCT_PROVIDER", "http_product"),
-                web_search_provider=os.getenv("OMNIMATCH_WEB_SEARCH_PROVIDER", "http_web_search"),
+                product_provider=os.getenv("OMNIMATCH_PRODUCT_PROVIDER", "serpapi"),
+                web_search_provider=os.getenv("OMNIMATCH_WEB_SEARCH_PROVIDER", "serper"),
                 shipping_provider=os.getenv("OMNIMATCH_SHIPPING_PROVIDER", "rate_table"),
                 memory_provider=os.getenv("OMNIMATCH_MEMORY_PROVIDER", "memory"),
                 eval_provider=os.getenv("OMNIMATCH_EVAL_PROVIDER", "heuristic"),
@@ -90,14 +93,38 @@ class OmniMatchSettings:
         }
 
     def validate(self) -> None:
-        if self.profile != "dev":
+        if self.profile == "test":
             return
+        if self.profile == "dev":
+            for name, provider in {
+                "OMNIMATCH_LLM_PROVIDER": self.llm_provider,
+                "OMNIMATCH_PRODUCT_PROVIDER": self.product_provider,
+                "OMNIMATCH_WEB_SEARCH_PROVIDER": self.web_search_provider,
+                "OMNIMATCH_SHIPPING_PROVIDER": self.shipping_provider,
+            }.items():
+                if provider == "placeholder":
+                    raise ConfigError(f"{name}=placeholder is not allowed for dev profile")
         if self.llm_provider != "placeholder" and not os.getenv("OPENAI_API_KEY"):
-            raise ConfigError("OPENAI_API_KEY is required for dev LLM provider")
-        if self.product_provider != "placeholder" and not self.product_api_url:
-            raise ConfigError("OMNIMATCH_PRODUCT_API_URL is required for dev product provider")
+            raise ConfigError(f"OPENAI_API_KEY is required for {self.profile} LLM provider")
+        if self.product_provider == "serpapi":
+            if not os.getenv("SERPAPI_API_KEY"):
+                raise ConfigError(
+                    f"SERPAPI_API_KEY is required for {self.profile} SerpApi product provider"
+                )
+        elif self.product_provider != "placeholder" and not self.product_api_url:
+            raise ConfigError(
+                f"OMNIMATCH_PRODUCT_API_URL is required for {self.profile} product provider"
+            )
+        if self.web_search_provider == "serper":
+            if not os.getenv("SERPER_API_KEY"):
+                raise ConfigError(
+                    f"SERPER_API_KEY is required for {self.profile} Serper web search provider"
+                )
+            return
         if self.web_search_provider != "placeholder" and not self.web_search_api_url:
-            raise ConfigError("OMNIMATCH_WEB_SEARCH_API_URL is required for dev web search provider")
+            raise ConfigError(
+                f"OMNIMATCH_WEB_SEARCH_API_URL is required for {self.profile} web search provider"
+            )
 
     @staticmethod
     def _mode_for(provider: str, fake_allowed: bool) -> ProviderMode:

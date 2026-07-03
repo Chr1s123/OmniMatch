@@ -1,10 +1,41 @@
 import re
+from typing import Any
 
 from app.schemas import ShoppingIntent
 from app.tools.context import ToolContext
 
 
 async def plan_query(query: str, ctx: ToolContext) -> ShoppingIntent:
+    fallback = _heuristic_intent(query)
+    result = await ctx.providers.llm.plan_next_action(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Extract shopping intent as JSON. Return an object with action "
+                    "'plan_query' and arguments containing category, budget, "
+                    "preferences, negative_constraints, and destination. Use arrays "
+                    "for preferences and negative_constraints."
+                ),
+            },
+            {"role": "user", "content": query},
+        ]
+    )
+    arguments = result.data.get("arguments", {})
+    intent = _intent_from_arguments(query, arguments, fallback)
+    ctx.observations.append(
+        {
+            "tool": "Planner",
+            "provider": result.provider,
+            "provider_mode": result.provider_mode,
+            "latency_ms": result.latency_ms,
+            "warnings": result.warnings,
+        }
+    )
+    return intent
+
+
+def _heuristic_intent(query: str) -> ShoppingIntent:
     budget_match = re.search(r"预算\s*(\d+)|(\d+)\s*块|(\d+)\s*元", query)
     budget: float | None = 300
     if budget_match:
@@ -27,5 +58,51 @@ async def plan_query(query: str, ctx: ToolContext) -> ShoppingIntent:
         preferences=preferences,
         negative_constraints=negative_constraints,
     )
-    ctx.observations.append({"tool": "Planner", "category": category, "budget": budget})
     return intent
+
+
+def _intent_from_arguments(
+    query: str,
+    arguments: Any,
+    fallback: ShoppingIntent,
+) -> ShoppingIntent:
+    if not isinstance(arguments, dict) or not arguments:
+        return fallback
+
+    category = str(arguments.get("category") or fallback.category)
+    budget = _coerce_budget(arguments.get("budget"), fallback.budget)
+    preferences = _coerce_string_list(arguments.get("preferences"), fallback.preferences)
+    negative_constraints = _coerce_string_list(
+        arguments.get("negative_constraints"),
+        fallback.negative_constraints,
+    )
+    destination = arguments.get("destination") or fallback.destination
+
+    return ShoppingIntent(
+        original_query=query,
+        category=category,
+        budget=budget,
+        preferences=preferences,
+        negative_constraints=negative_constraints,
+        destination=str(destination) if destination else None,
+    )
+
+
+def _coerce_budget(value: Any, fallback: float | None) -> float | None:
+    if value is None or value == "":
+        return fallback
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_string_list(value: Any, fallback: list[str]) -> list[str]:
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return [value] if value else fallback
+    if isinstance(value, list):
+        items = [str(item) for item in value if item]
+        return items or fallback
+    return fallback

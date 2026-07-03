@@ -14,6 +14,9 @@ from app.providers.placeholder import (
     PlaceholderShippingProvider,
     PlaceholderWebSearchProvider,
 )
+from app.providers.serpapi_product import SerpApiProductProvider
+from app.providers.serper_web_search import SerperWebSearchProvider
+from app.providers.shipping import RateTableShippingProvider
 
 
 @dataclass(frozen=True)
@@ -34,25 +37,33 @@ class ProviderRegistry:
                 base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             )
         )
-        product: ProductSearchProvider = (
-            PlaceholderProductSearchProvider()
-            if settings.product_provider == "placeholder"
-            else HttpProductSearchProvider(
+        if settings.product_provider == "placeholder":
+            product: ProductSearchProvider = PlaceholderProductSearchProvider()
+        elif settings.product_provider == "serpapi":
+            product = SerpApiProductProvider(api_key=os.getenv("SERPAPI_API_KEY", ""))
+        else:
+            product = HttpProductSearchProvider(
                 api_url=settings.product_api_url or "",
                 api_key=os.getenv("OMNIMATCH_PRODUCT_API_KEY", ""),
             )
-        )
-        web_search: WebSearchProvider = (
-            PlaceholderWebSearchProvider()
-            if settings.web_search_provider == "placeholder"
-            else HttpWebSearchProvider(
+        if settings.web_search_provider == "placeholder":
+            web_search: WebSearchProvider = PlaceholderWebSearchProvider()
+        elif settings.web_search_provider == "serper":
+            web_search = SerperWebSearchProvider(api_key=os.getenv("SERPER_API_KEY", ""))
+        else:
+            web_search = HttpWebSearchProvider(
                 api_url=settings.web_search_api_url or "",
                 api_key=os.getenv("OMNIMATCH_WEB_SEARCH_API_KEY", ""),
             )
-        )
+        if settings.shipping_provider == "placeholder":
+            shipping: ShippingProvider = PlaceholderShippingProvider()
+        elif settings.shipping_provider == "rate_table":
+            shipping = RateTableShippingProvider()
+        else:
+            shipping = RateTableShippingProvider()
         return cls(
             llm=llm,
             product=product,
             web_search=web_search,
-            shipping=PlaceholderShippingProvider(),
+            shipping=shipping,
         )

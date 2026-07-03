@@ -9,8 +9,9 @@ The current app includes:
 - FastAPI task APIs and WebSocket event replay.
 - A provider-backed `CompetitionAgentLoop`.
 - Configurable `dev`, `submission`, and `test` profiles.
-- Real HTTP/OpenAI-compatible provider adapters for development.
-- Deterministic placeholder providers for submission and smoke tests.
+- Real HTTP/OpenAI-compatible provider adapters for runtime use.
+- Deterministic placeholder providers for submission packaging, tests, and
+  explicit local fakes.
 - Structured candidate scoring, trace files, and a React observability console.
 - A small evaluation harness for repeatable regression cases.
 
@@ -26,18 +27,21 @@ Run the development profile with real providers:
 
 ```bash
 cp .env.example .env
-# fill OPENAI_API_KEY, OMNIMATCH_PRODUCT_API_URL, OMNIMATCH_PRODUCT_API_KEY,
-# OMNIMATCH_WEB_SEARCH_API_URL, and OMNIMATCH_WEB_SEARCH_API_KEY
+# fill OPENAI_API_KEY, SERPAPI_API_KEY for OMNIMATCH_PRODUCT_PROVIDER=serpapi,
+# and SERPER_API_KEY for OMNIMATCH_WEB_SEARCH_PROVIDER=serper
 # optionally fill OPENAI_BASE_URL for OpenAI-compatible providers
 OMNIMATCH_PROFILE=dev uv run uvicorn app.api.server:app --reload
 ```
 
-Run the submission profile without secrets:
+Run the submission profile without real provider secrets:
 
 ```bash
 OMNIMATCH_PROFILE=submission uv run python examples/run_competition_agent.py
-OMNIMATCH_PROFILE=submission uv run pytest -v
 ```
+
+`submission` defaults all providers to deterministic placeholders so uploaded
+artifacts can run in environments without secrets. If you explicitly select a
+real provider in `submission`, the matching API key is still required.
 
 Run backend tests:
 
@@ -73,7 +77,7 @@ npm run build
 Start the backend:
 
 ```bash
-OMNIMATCH_PROFILE=submission uv run uvicorn app.api.server:app --reload
+OMNIMATCH_PROFILE=dev uv run uvicorn app.api.server:app --reload
 ```
 
 Start the frontend in another terminal:
@@ -103,7 +107,7 @@ output/{thread_id}/
 Run the competition loop directly:
 
 ```bash
-OMNIMATCH_PROFILE=submission uv run python examples/run_competition_agent.py
+OMNIMATCH_PROFILE=dev uv run python examples/run_competition_agent.py
 ```
 
 The legacy mock entrypoint remains as a compatibility wrapper:
