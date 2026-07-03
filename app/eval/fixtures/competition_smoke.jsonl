@@ -1,0 +1,3 @@
+{"id":"budget_no_plastic","query":"旅行三件套，预算300，不要塑料","required_terms":["旅行"],"forbidden_terms":["无法推荐"]}
+{"id":"ambiguous_phone","query":"给我推荐一个手机","required_terms":["推荐"],"forbidden_terms":["traceback"]}
+{"id":"cheap_durable","query":"便宜耐用的通勤背包，预算200","required_terms":["推荐"],"forbidden_terms":["traceback"]}
