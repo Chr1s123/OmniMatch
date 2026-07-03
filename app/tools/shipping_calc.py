@@ -1,18 +1,32 @@
-from app.schemas import Product
+from app.schemas import ProductCandidate
+from app.tools.context import ToolContext
 
 
-PLATFORM_SHIPPING = {
-    "Amazon": 28,
-    "eBay": 35,
-    "AliExpress": 18,
-    "Shopee": 22,
-}
-
-
-async def calculate_shipping(products: list[Product]) -> list[Product]:
-    priced: list[Product] = []
-    for product in products:
-        shipping = PLATFORM_SHIPPING.get(product.platform, 25)
-        tax = round(product.price * 0.03, 2) if product.price > 180 else 0
-        priced.append(product.model_copy(update={"shipping": shipping, "tax": tax}))
+async def calculate_shipping(
+    candidates: list[ProductCandidate],
+    ctx: ToolContext,
+) -> list[ProductCandidate]:
+    priced: list[ProductCandidate] = []
+    for candidate in candidates:
+        result = await ctx.providers.shipping.estimate(
+            candidate.model_dump(),
+            destination=None,
+        )
+        ctx.observations.append(
+            {
+                "tool": "ShippingCalc",
+                "provider": result.provider,
+                "provider_mode": result.provider_mode,
+                "latency_ms": result.latency_ms,
+                "warnings": result.warnings,
+            }
+        )
+        priced.append(
+            candidate.model_copy(
+                update={
+                    "shipping": result.data.get("shipping", 0),
+                    "tax": result.data.get("tax", 0),
+                }
+            )
+        )
     return priced

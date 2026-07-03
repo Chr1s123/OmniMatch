@@ -1,8 +1,12 @@
-from app.schemas import Product
+from app.schemas import ScoredProduct, ShoppingIntent
+from app.tools.context import ToolContext
 
 
-async def pick_items(products: list[Product], intent: dict) -> list[Product]:
-    budget = intent.get("budget", 300)
-    within_budget = [product for product in products if product.total_price <= budget]
-    candidates = within_budget or products
-    return candidates[:3]
+async def pick_items(
+    scored: list[ScoredProduct],
+    intent: ShoppingIntent,
+    ctx: ToolContext,
+) -> list[ScoredProduct]:
+    picked = scored[:3]
+    ctx.observations.append({"tool": "ItemPicker", "picked_count": len(picked)})
+    return picked

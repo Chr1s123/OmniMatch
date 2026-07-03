@@ -1,6 +1,9 @@
 import pytest
 
+from app.config import OmniMatchSettings
+from app.providers.registry import ProviderRegistry
 from app.tools.category_insight import get_category_insight
+from app.tools.context import ToolContext
 from app.tools.item_picker import pick_items
 from app.tools.item_search import search_items
 from app.tools.planner import plan_query
@@ -10,26 +13,29 @@ from app.tools.shopping_summary import build_summary
 
 
 @pytest.mark.asyncio
-async def test_mock_tool_chain_returns_ranked_summary():
-    intent = await plan_query("我想买旅行三件套，预算300，不要塑料")
-    assert intent["budget"] == 300
-    assert "不要塑料" in intent["preferences"]
+async def test_tool_chain_uses_provider_backed_candidates():
+    settings = OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
+    ctx = ToolContext(settings=settings, providers=ProviderRegistry.from_settings(settings))
 
-    insight = await get_category_insight(intent)
-    assert "旅行" in insight["category"]
+    intent = await plan_query("我想买旅行三件套，预算300，不要塑料", ctx)
+    insight = await get_category_insight(intent, ctx)
+    candidates = await search_items(intent, insight, ctx)
+    shipped = await calculate_shipping(candidates, ctx)
+    compared = await compare_prices(shipped, intent, ctx)
+    picked = await pick_items(compared, intent, ctx)
+    summary = await build_summary("原始需求", picked, ctx)
 
-    products = await search_items("Amazon", intent, insight)
-    assert products[0].platform == "Amazon"
-
-    shipped = await calculate_shipping(products)
-    assert all(product.shipping >= 0 for product in shipped)
-
-    compared = await compare_prices(shipped)
-    assert compared == sorted(compared, key=lambda product: product.total_price)
-
-    picked = await pick_items(compared, intent)
+    assert intent.negative_constraints == ["塑料"]
+    assert candidates[0].evidence
+    assert picked[0].score.total >= picked[-1].score.total
     assert len(picked) <= 3
-
-    summary = await build_summary("原始需求", picked)
-    assert summary.products == picked
-    assert "原始需求" in summary.message
+    assert summary.products
