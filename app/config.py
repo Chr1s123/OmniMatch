@@ -38,13 +38,13 @@ class OmniMatchSettings:
         if profile == "submission":
             settings = cls(
                 profile="submission",
-                llm_provider=os.getenv("OMNIMATCH_LLM_PROVIDER", "placeholder"),
+                llm_provider="placeholder",
                 llm_model=os.getenv("OMNIMATCH_LLM_MODEL", "placeholder-llm"),
-                product_provider=os.getenv("OMNIMATCH_PRODUCT_PROVIDER", "placeholder"),
-                web_search_provider=os.getenv("OMNIMATCH_WEB_SEARCH_PROVIDER", "placeholder"),
-                shipping_provider=os.getenv("OMNIMATCH_SHIPPING_PROVIDER", "placeholder"),
-                memory_provider=os.getenv("OMNIMATCH_MEMORY_PROVIDER", "placeholder"),
-                eval_provider=os.getenv("OMNIMATCH_EVAL_PROVIDER", "placeholder"),
+                product_provider="placeholder",
+                web_search_provider="placeholder",
+                shipping_provider="placeholder",
+                memory_provider="placeholder",
+                eval_provider="placeholder",
             )
         elif profile == "test":
             settings = cls(

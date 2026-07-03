@@ -92,6 +92,7 @@ async def test_openai_llm_provider_parses_action_json():
 
 def test_registry_selects_real_http_providers(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example/v1")
     monkeypatch.setenv("OMNIMATCH_PRODUCT_API_KEY", "product-key")
     monkeypatch.setenv("OMNIMATCH_WEB_SEARCH_API_KEY", "search-key")
     settings = OmniMatchSettings(
@@ -110,5 +111,6 @@ def test_registry_selects_real_http_providers(monkeypatch):
     registry = ProviderRegistry.from_settings(settings)
 
     assert isinstance(registry.llm, OpenAILLMProvider)
+    assert registry.llm.base_url == "https://llm.example/v1"
     assert isinstance(registry.product, HttpProductSearchProvider)
     assert isinstance(registry.web_search, HttpWebSearchProvider)

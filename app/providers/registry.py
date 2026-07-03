@@ -31,6 +31,7 @@ class ProviderRegistry:
             else OpenAILLMProvider(
                 api_key=os.getenv("OPENAI_API_KEY", ""),
                 model=settings.llm_model,
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             )
         )
         product: ProductSearchProvider = (

@@ -6,6 +6,7 @@ from app.config import ConfigError, OmniMatchSettings
 
 
 def clear_omnimatch_env(monkeypatch):
+    monkeypatch.setattr("app.config.load_dotenv", lambda: None)
     for key in list(os.environ):
         if key.startswith("OMNIMATCH_") or key.endswith("_API_KEY"):
             monkeypatch.delenv(key, raising=False)
@@ -37,6 +38,22 @@ def test_submission_defaults_to_placeholder_without_keys(monkeypatch):
     assert settings.product_provider == "placeholder"
     assert settings.web_search_provider == "placeholder"
     assert settings.provider_modes()["llm"] == "placeholder"
+
+
+def test_submission_profile_ignores_real_provider_env_values(monkeypatch):
+    clear_omnimatch_env(monkeypatch)
+    monkeypatch.setenv("OMNIMATCH_PROFILE", "submission")
+    monkeypatch.setenv("OMNIMATCH_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OMNIMATCH_PRODUCT_PROVIDER", "http_product")
+    monkeypatch.setenv("OMNIMATCH_WEB_SEARCH_PROVIDER", "http_web_search")
+    monkeypatch.setenv("OMNIMATCH_SHIPPING_PROVIDER", "rate_table")
+
+    settings = OmniMatchSettings.from_env()
+
+    assert settings.llm_provider == "placeholder"
+    assert settings.product_provider == "placeholder"
+    assert settings.web_search_provider == "placeholder"
+    assert settings.shipping_provider == "placeholder"
 
 
 def test_test_profile_uses_fake_or_placeholder_without_network(monkeypatch):
