@@ -48,6 +48,10 @@ async def get_task(thread_id: str) -> dict:
 @app.websocket("/ws/{thread_id}")
 async def websocket_events(websocket: WebSocket, thread_id: str) -> None:
     await manager.connect(thread_id, websocket)
+    state = TASKS.get(thread_id)
+    if state is not None:
+        for event in state.events:
+            await websocket.send_json(event.model_dump(mode="json"))
     try:
         while True:
             await websocket.receive_text()
