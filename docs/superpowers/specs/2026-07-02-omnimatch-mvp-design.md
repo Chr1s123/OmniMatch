@@ -1,5 +1,10 @@
 # OmniMatch MVP Design
 
+> Superseded direction, 2026-07-03: this document described the original
+> teaching/mock MVP. The active product direction is now the competition-grade
+> agent design in
+> `docs/superpowers/specs/2026-07-03-competition-agent-design.md`.
+
 ## Background
 
 OmniMatch is a conversational cross-platform shopping Agent. The long-term product described in `idea.md` includes a main AgentLoop, homogeneous forked sub-AgentLoops, nine core tools, vector recall, long-term memory, context compression, AGUI events, and an evaluation/training loop.
