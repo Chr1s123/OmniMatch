@@ -42,6 +42,8 @@ class ShoppingSummary(BaseModel):
     message: str
     products: list[Product]
     warnings: list[str] = Field(default_factory=list)
+    status_note: str = ""
+    uncertainty: list[str] = Field(default_factory=list)
 
 
 class ShoppingIntent(BaseModel):

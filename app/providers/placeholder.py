@@ -13,15 +13,33 @@ def _latency_ms(start: float) -> int:
 class PlaceholderLLMProvider:
     provider = "placeholder_llm"
 
+    def __init__(self) -> None:
+        self._index = 0
+        self._actions = [
+            "plan",
+            "category_insight",
+            "item_search",
+            "shipping",
+            "rank",
+            "pick",
+            "finish",
+        ]
+
     async def plan_next_action(self, messages: list[dict[str, Any]]) -> ProviderResult[dict[str, Any]]:
         start = time.perf_counter()
+        action = self._actions[min(self._index, len(self._actions) - 1)]
+        self._index += 1
         return ProviderResult(
             provider=self.provider,
             provider_mode="placeholder",
             latency_ms=_latency_ms(start),
-            data={"action": "finish_if_enough_else_search", "arguments": {}},
+            data={
+                "action": action,
+                "arguments": {},
+                "thought": f"placeholder selected {action}",
+            },
             warnings=["placeholder LLM used"],
-            response_summary="deterministic placeholder plan",
+            response_summary=f"deterministic placeholder action={action}",
         )
 
 

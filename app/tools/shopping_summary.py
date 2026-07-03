@@ -6,6 +6,7 @@ async def build_summary(
     query: str,
     picked: list[ScoredProduct],
     ctx: ToolContext,
+    status_note: str = "",
 ) -> ShoppingSummary:
     products = [
         Product(
@@ -26,10 +27,15 @@ async def build_summary(
     provider_modes = ", ".join(
         sorted({str(obs.get("provider_mode")) for obs in ctx.observations if obs.get("provider_mode")})
     )
+    if status_note and not products:
+        message = f"基于“{query}”，{status_note}"
+    else:
+        message = f"基于“{query}”，为你推荐 {count} 件商品，已按约束、证据和含运费总价排序。"
     return ShoppingSummary(
-        message=f"基于“{query}”，为你推荐 {count} 件商品，已按约束、证据和含运费总价排序。",
+        message=message,
         products=products,
         warnings=[f"evidence used provider modes: {provider_modes}"] if provider_modes else [],
+        status_note=status_note,
     )
 
 

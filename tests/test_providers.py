@@ -2,6 +2,7 @@ import pytest
 
 from app.config import OmniMatchSettings
 from app.providers.base import ProviderResult
+from app.providers.placeholder import PlaceholderLLMProvider
 from app.providers.registry import ProviderRegistry
 
 
@@ -40,3 +41,23 @@ def test_provider_result_redacts_secret_like_values():
 
     assert "secret-token" not in result.redacted_summary()
     assert "api_key=abc" not in result.redacted_summary()
+
+
+@pytest.mark.asyncio
+async def test_placeholder_llm_proposes_deterministic_action_sequence():
+    provider = PlaceholderLLMProvider()
+    actions: list[str] = []
+
+    for _ in range(7):
+        result = await provider.plan_next_action([{"role": "user", "content": "next"}])
+        actions.append(result.data["action"])
+
+    assert actions == [
+        "plan",
+        "category_insight",
+        "item_search",
+        "shipping",
+        "rank",
+        "pick",
+        "finish",
+    ]

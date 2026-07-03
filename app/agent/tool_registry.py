@@ -44,6 +44,15 @@ class ToolRegistry:
             return await pick_items(self.scored, self.intent, self.ctx)
         raise ValueError(f"unknown tool action: {action}")
 
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "has_intent": self.intent is not None,
+            "has_insight": self.insight is not None,
+            "candidate_count": len(self.candidates),
+            "scored_count": len(self.scored),
+            "top_score": self.scored[0].score.total if self.scored else None,
+        }
+
     def _require_intent(self) -> None:
         if self.intent is None:
             raise ValueError("plan action must run before this tool")

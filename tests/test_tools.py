@@ -3,6 +3,7 @@ import pytest
 from app.config import OmniMatchSettings
 from app.providers.base import ProviderResult
 from app.providers.registry import ProviderRegistry
+from app.agent.tool_registry import ToolRegistry
 from app.tools.category_insight import get_category_insight
 from app.tools.context import ToolContext
 from app.tools.item_picker import pick_items
@@ -102,3 +103,41 @@ async def test_plan_query_uses_llm_provider_for_intent():
         "latency_ms": 7,
         "warnings": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_snapshot_reports_progress():
+    settings = OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
+    ctx = ToolContext(settings=settings, providers=ProviderRegistry.from_settings(settings))
+    registry = ToolRegistry(ctx)
+
+    initial = registry.snapshot()
+    assert initial == {
+        "has_intent": False,
+        "has_insight": False,
+        "candidate_count": 0,
+        "scored_count": 0,
+        "top_score": None,
+    }
+
+    await registry.run("plan", {"query": "旅行三件套，预算300，不要塑料"})
+    await registry.run("category_insight", {})
+    await registry.run("item_search", {})
+    await registry.run("shipping", {})
+    await registry.run("rank", {})
+
+    after_rank = registry.snapshot()
+    assert after_rank["has_intent"] is True
+    assert after_rank["has_insight"] is True
+    assert after_rank["candidate_count"] == 4
+    assert after_rank["scored_count"] == 4
+    assert after_rank["top_score"] is not None
