@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from app.config import OmniMatchSettings
+from app.providers.base import ProviderError
 from app.providers.http_product import HttpProductSearchProvider
 from app.providers.http_web_search import HttpWebSearchProvider
 from app.providers.openai_llm import OpenAILLMProvider
@@ -11,7 +12,7 @@ from app.providers.registry import ProviderRegistry
 @pytest.mark.asyncio
 async def test_http_product_provider_normalizes_items():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["x-api-key"] == "unit-key"
+        assert request.headers["authorization"] == "Bearer unit-key"
         return httpx.Response(
             200,
             json={
@@ -41,6 +42,22 @@ async def test_http_product_provider_normalizes_items():
     assert result.provider_mode == "real"
     assert result.data[0]["id"] == "raw-1"
     assert result.data[0]["platform"] == "Amazon"
+
+
+@pytest.mark.asyncio
+async def test_http_product_provider_includes_error_body():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid_api_key"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = HttpProductSearchProvider(
+        api_url="https://product.example/search",
+        api_key="unit-key",
+        client=client,
+    )
+
+    with pytest.raises(ProviderError, match=r"invalid_api_key"):
+        await provider.search("旅行三件套", platforms=["Amazon"])
 
 
 @pytest.mark.asyncio
