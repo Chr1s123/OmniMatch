@@ -5,7 +5,8 @@ from app.api.server import TASKS
 from app.schemas import AgentEvent, TaskState
 
 
-def test_create_task_returns_thread_id():
+def test_create_task_returns_thread_id(monkeypatch):
+    monkeypatch.setenv("OMNIMATCH_PROFILE", "submission")
     client = TestClient(app)
     response = client.post("/api/tasks", json={"query": "旅行三件套，预算300"})
     assert response.status_code == 200
@@ -40,3 +41,32 @@ def test_websocket_replays_existing_events():
 
     assert data["type"] == "task_result"
     assert data["payload"]["summary"]["message"] == "ok"
+
+
+def test_get_task_includes_profile_and_trace_paths():
+    client = TestClient(app)
+    TASKS["thread_done"] = TaskState(
+        thread_id="thread_done",
+        status="completed",
+        profile="submission",
+        provider_modes={"llm": "placeholder"},
+        trace_paths={"summary": "output/thread_done/summary.json"},
+    )
+
+    response = client.get("/api/tasks/thread_done")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["profile"] == "submission"
+    assert data["provider_modes"]["llm"] == "placeholder"
+    assert data["trace_paths"]["summary"].endswith("summary.json")
+
+
+def test_unknown_websocket_thread_is_rejected():
+    client = TestClient(app)
+
+    try:
+        with client.websocket_connect("/ws/thread_missing"):
+            raise AssertionError("unknown websocket should not stay connected")
+    except Exception as exc:
+        assert "1008" in str(exc) or "WebSocketDisconnect" in exc.__class__.__name__

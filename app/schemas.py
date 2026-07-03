@@ -104,4 +104,8 @@ class TaskState(BaseModel):
     query: str | None = None
     result: ShoppingSummary | None = None
     error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    profile: str | None = None
+    provider_modes: dict[str, str] = Field(default_factory=dict)
+    trace_paths: dict[str, str] = Field(default_factory=dict)
     events: list[AgentEvent] = Field(default_factory=list)

@@ -92,9 +92,17 @@ class CompetitionAgentLoop:
                 picked = result
 
         summary = await build_summary(query, picked or [], ctx)
-        self._write_json("summary.json", summary.model_dump())
-        self._write_json("candidates.json", [item.model_dump() for item in tools.scored])
-        self._write_jsonl("trace.jsonl", trace)
+        try:
+            self._write_json("summary.json", summary.model_dump())
+            self._write_json("candidates.json", [item.model_dump() for item in tools.scored])
+            self._write_jsonl("trace.jsonl", trace)
+        except OSError as exc:
+            summary.warnings.append(f"output persistence failed: {exc}")
+            await self.monitor.emit(
+                "task_warning",
+                f"Output persistence failed: {exc}",
+                payload={"warning": str(exc)},
+            )
         await self.monitor.emit(
             "task_result",
             "Shopping summary generated.",

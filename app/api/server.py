@@ -7,9 +7,11 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.agent.main_agent import MockAgentLoop
+from app.agent.main_agent import CompetitionAgentLoop
 from app.api.connection import ConnectionManager
 from app.api.monitor import EventCollector
+from app.config import OmniMatchSettings
+from app.providers.registry import ProviderRegistry
 from app.schemas import AgentEvent, ShoppingQuery, TaskState
 
 
@@ -30,10 +32,17 @@ app.add_middleware(
 @app.post("/api/tasks")
 async def create_task(request: ShoppingQuery) -> dict:
     thread_id = f"thread_{uuid4().hex[:8]}"
-    state = TaskState(thread_id=thread_id, query=request.query)
+    settings = OmniMatchSettings.from_env()
+    provider_modes = settings.provider_modes()
+    state = TaskState(
+        thread_id=thread_id,
+        query=request.query,
+        profile=settings.profile,
+        provider_modes=provider_modes,
+    )
     TASKS[thread_id] = state
     session_dir = OUTPUT_ROOT / thread_id
-    asyncio.create_task(_run_task(thread_id, request.query, session_dir))
+    asyncio.create_task(_run_task(thread_id, request.query, session_dir, settings))
     return {"thread_id": thread_id, "status": state.status}
 
 
@@ -47,11 +56,13 @@ async def get_task(thread_id: str) -> dict:
 
 @app.websocket("/ws/{thread_id}")
 async def websocket_events(websocket: WebSocket, thread_id: str) -> None:
-    await manager.connect(thread_id, websocket)
     state = TASKS.get(thread_id)
-    if state is not None:
-        for event in state.events:
-            await websocket.send_json(event.model_dump(mode="json"))
+    if state is None:
+        await websocket.close(code=1008, reason="Task not found")
+        return
+    await manager.connect(thread_id, websocket)
+    for event in state.events:
+        await websocket.send_json(event.model_dump(mode="json"))
     try:
         while True:
             await websocket.receive_text()
@@ -59,18 +70,35 @@ async def websocket_events(websocket: WebSocket, thread_id: str) -> None:
         manager.disconnect(thread_id, websocket)
 
 
-async def _run_task(thread_id: str, query: str, session_dir: Path) -> None:
+async def _run_task(
+    thread_id: str,
+    query: str,
+    session_dir: Path,
+    settings: OmniMatchSettings,
+) -> None:
     async def sink(event: AgentEvent) -> None:
         state = TASKS[thread_id]
         state.events.append(event)
         await manager.broadcast(event)
 
     monitor = EventCollector(thread_id=thread_id, sink=sink)
-    loop = MockAgentLoop(thread_id=thread_id, session_dir=session_dir, monitor=monitor)
+    loop = CompetitionAgentLoop(
+        thread_id=thread_id,
+        session_dir=session_dir,
+        settings=settings,
+        providers=ProviderRegistry.from_settings(settings),
+        monitor=monitor,
+    )
     try:
         summary = await loop.run(query)
-        TASKS[thread_id].status = "completed"
-        TASKS[thread_id].result = summary
+        state = TASKS[thread_id]
+        state.status = "completed"
+        state.result = summary
+        state.trace_paths = {
+            "summary": str(session_dir / "summary.json"),
+            "candidates": str(session_dir / "candidates.json"),
+            "trace": str(session_dir / "trace.jsonl"),
+        }
     except Exception as exc:  # pragma: no cover - defensive path exercised manually
         TASKS[thread_id].status = "failed"
         TASKS[thread_id].error = str(exc)
