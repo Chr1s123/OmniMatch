@@ -157,6 +157,23 @@ button:disabled {
   padding: 16px;
 }
 
+.product-link {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 12px;
+  border-radius: 6px;
+  background: #e8f4f1;
+  color: #146c5c;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.product-link:hover {
+  background: #d6ece6;
+}
+
 .platform {
   color: #146c5c;
   font-size: 13px;

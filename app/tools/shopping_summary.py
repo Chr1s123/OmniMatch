@@ -27,14 +27,26 @@ async def build_summary(
     provider_modes = ", ".join(
         sorted({str(obs.get("provider_mode")) for obs in ctx.observations if obs.get("provider_mode")})
     )
+    skipped_missing_url_count = sum(
+        int(obs.get("skipped_missing_url_count", 0))
+        for obs in ctx.observations
+        if obs.get("tool") == "ItemPicker"
+    )
     if status_note and not products:
         message = f"基于“{query}”，{status_note}"
+    elif not products and skipped_missing_url_count:
+        message = f"基于“{query}”，没有找到带可跳转链接的商品候选，暂不展示推荐。"
     else:
         message = f"基于“{query}”，为你推荐 {count} 件商品，已按约束、证据和含运费总价排序。"
+    warnings = []
+    if provider_modes:
+        warnings.append(f"evidence used provider modes: {provider_modes}")
+    if skipped_missing_url_count:
+        warnings.append(f"skipped {skipped_missing_url_count} candidates without product URLs")
     return ShoppingSummary(
         message=message,
         products=products,
-        warnings=[f"evidence used provider modes: {provider_modes}"] if provider_modes else [],
+        warnings=warnings,
         status_note=status_note,
     )
 

@@ -4,6 +4,7 @@ from app.config import OmniMatchSettings
 from app.providers.base import ProviderResult
 from app.providers.registry import ProviderRegistry
 from app.agent.tool_registry import ToolRegistry
+from app.schemas import CandidateScore, ProductCandidate, ScoredProduct, ShoppingIntent
 from app.tools.category_insight import get_category_insight
 from app.tools.context import ToolContext
 from app.tools.item_picker import pick_items
@@ -141,3 +142,84 @@ async def test_tool_registry_snapshot_reports_progress():
     assert after_rank["candidate_count"] == 4
     assert after_rank["scored_count"] == 4
     assert after_rank["top_score"] is not None
+
+
+@pytest.mark.asyncio
+async def test_pick_items_skips_missing_urls_and_backfills_from_later_candidates():
+    settings = OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
+    ctx = ToolContext(settings=settings, providers=ProviderRegistry.from_settings(settings))
+    intent = ShoppingIntent(original_query="旅行三件套", category="旅行三件套")
+    scored = [
+        scored_candidate("no-url-1", "", 90),
+        scored_candidate("with-url-1", "https://example.com/1", 80),
+        scored_candidate("no-url-2", "  ", 70),
+        scored_candidate("with-url-2", "https://example.com/2", 60),
+        scored_candidate("with-url-3", "https://example.com/3", 50),
+    ]
+
+    picked = await pick_items(scored, intent, ctx)
+
+    assert [item.candidate.id for item in picked] == ["with-url-1", "with-url-2", "with-url-3"]
+    assert all(item.candidate.url.strip() for item in picked)
+    assert ctx.observations[-1] == {
+        "tool": "ItemPicker",
+        "picked_count": 3,
+        "skipped_missing_url_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_summary_reports_when_all_candidates_are_missing_urls():
+    settings = OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
+    ctx = ToolContext(settings=settings, providers=ProviderRegistry.from_settings(settings))
+    intent = ShoppingIntent(original_query="旅行三件套", category="旅行三件套")
+    scored = [
+        scored_candidate("no-url-1", "", 90),
+        scored_candidate("no-url-2", "  ", 80),
+    ]
+
+    picked = await pick_items(scored, intent, ctx)
+    summary = await build_summary("旅行三件套", picked, ctx)
+
+    assert summary.products == []
+    assert "没有找到带可跳转链接" in summary.message
+    assert "skipped 2 candidates without product URLs" in summary.warnings
+
+
+def scored_candidate(candidate_id: str, url: str, total: float) -> ScoredProduct:
+    candidate = ProductCandidate(
+        id=candidate_id,
+        platform="Unit",
+        title=f"Candidate {candidate_id}",
+        price=100,
+        rating=4.5,
+        url=url,
+    )
+    score = CandidateScore(
+        total=total,
+        constraint_score=total,
+        evidence_score=0,
+        price_score=0,
+        preference_score=0,
+        risk_penalty=0,
+        total_landed_cost=candidate.total_landed_cost,
+    )
+    return ScoredProduct(candidate=candidate, score=score)

@@ -59,6 +59,7 @@ class CompetitionAgentLoop:
                 ctx=ctx,
                 steps=steps,
             )
+            action = self._ensure_executable_action(action, tools, query)
             await self._emit_provider_observation(action.name, planner_observation)
             await self.monitor.emit(
                 "thought",
@@ -200,6 +201,21 @@ class CompetitionAgentLoop:
         if action.name == "plan":
             return {"query": action.arguments.get("query") or query}
         return action.arguments
+
+    def _ensure_executable_action(
+        self,
+        action: AgentAction,
+        tools: ToolRegistry,
+        query: str,
+    ) -> AgentAction:
+        if action.is_terminal or action.name == "plan" or tools.snapshot()["has_intent"]:
+            return action
+        return AgentAction(
+            name="plan",
+            arguments={"query": query},
+            thought=f"Planner state is required before {action.name}; running plan first.",
+            message=action.message,
+        )
 
     async def _emit_provider_observation(
         self,

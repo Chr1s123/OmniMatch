@@ -181,6 +181,16 @@ function App() {
                       </strong>
                       <span>评分 {product.rating.toFixed(1)}</span>
                     </div>
+                    {product.url.trim() && (
+                      <a
+                        className="product-link"
+                        href={product.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        查看检索链接
+                      </a>
+                    )}
                   </article>
                 ))}
               </div>

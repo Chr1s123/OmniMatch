@@ -148,6 +148,41 @@ async def test_competition_loop_uses_llm_action_sequence(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_competition_loop_runs_plan_first_when_llm_skips_it(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    llm = SequenceLLMProvider(
+        [
+            {"action": "item_search", "arguments": {}, "thought": "Search immediately."},
+            {"action": "finish", "message": "Done."},
+        ]
+    )
+    providers = ProviderRegistry(
+        llm=llm,
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_skip_plan")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_skip_plan",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    summary = await loop.run("旅行三件套，预算300，不要塑料")
+
+    tool_starts = [event.tool for event in monitor.events if event.type == "tool_start"]
+    thoughts = [event.payload["action"] for event in monitor.events if event.type == "thought"]
+    assert tool_starts[0] == "plan"
+    assert thoughts[0] == "plan"
+    assert summary.message
+    assert (tmp_path / "summary.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_competition_loop_can_request_clarification(tmp_path):
     settings = submission_settings()
     base = ProviderRegistry.from_settings(settings)
