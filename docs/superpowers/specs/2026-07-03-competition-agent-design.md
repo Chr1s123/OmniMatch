@@ -1,5 +1,36 @@
 # OmniMatch Competition Agent Design
 
+## Current Progress - 2026-07-06
+
+Implemented and verified:
+
+- The mock MVP is superseded, but its runnable API/frontend skeleton remains.
+- `dev`, `submission`, and `test` profiles are implemented in `app/config.py`.
+- `submission` defaults to deterministic placeholder providers and runs without secrets.
+- Provider contracts, registry, placeholder providers, SerpApi/Serper adapters,
+  HTTP product/search adapters, OpenAI-compatible LLM adapter, and rate-table
+  shipping are present.
+- `CompetitionAgentLoop` is now observation-driven: it asks the configured LLM
+  provider for actions, executes selected tools, observes provider/tool output,
+  supports `finish`, `clarify`, `fail`, and stops on `max_steps`.
+- Tool state snapshots, structured ranking, event replay, trace output, and
+  frontend provider/profile observability are implemented.
+- Evaluation harness and smoke fixture exist under `app/eval`.
+- Verification on 2026-07-06:
+  - `uv run pytest -q` -> `48 passed, 1 warning`
+  - `OMNIMATCH_PROFILE=submission uv run python examples/run_competition_agent.py` -> exits 0 with placeholder warning
+  - `cd frontend && npm run build` -> exits 0
+
+Current gap:
+
+- The agent is structurally competition-ready, but recommendation quality still
+  depends on real provider credentials, real API response normalization, prompt
+  tuning, and evaluation-case expansion.
+- `provider_calls.jsonl` is still a design requirement; the current trace
+  persistence writes `summary.json`, `candidates.json`, and `trace.jsonl`.
+- The next implementation step is a real-provider validation pass plus richer
+  evaluation cases before more frontend or UX work.
+
 ## Background
 
 OmniMatch is no longer scoped as a teaching-oriented mock MVP. The active goal is

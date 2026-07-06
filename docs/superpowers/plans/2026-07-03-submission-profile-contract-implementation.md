@@ -2,6 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Current Progress - 2026-07-06
+
+Status: implementation complete and verified.
+
+- Steps 1-10 are complete.
+- Step 11 remains only if the current branch still needs publish housekeeping.
+- Current git log includes `ff0b4cc fix: restore submission profile placeholder defaults`.
+- Verification rerun on 2026-07-06:
+  - `uv run pytest -q` -> `48 passed, 1 warning`
+  - `OMNIMATCH_PROFILE=submission uv run python examples/run_competition_agent.py` -> exits 0 with placeholder-provider warning
+
 **Goal:** Make `OMNIMATCH_PROFILE=submission` default to deterministic placeholder providers and run without real provider secrets.
 
 **Architecture:** Keep profile behavior centralized in `app/config.py`. Tests define the contract in `tests/test_config.py`; README and `.env.example` document the runtime expectation without changing provider adapters, AgentLoop behavior, ranking, or frontend code.

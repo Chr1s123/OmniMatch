@@ -1,5 +1,23 @@
 # Submission Profile Contract Design
 
+## Current Progress - 2026-07-06
+
+Status: implemented and verified.
+
+- `OMNIMATCH_PROFILE=submission` defaults all provider families to
+  `placeholder`.
+- Submission defaults are read from the pre-`.env` process environment so local
+  dev provider selectors do not accidentally change a no-secret submission run.
+- Explicit real providers in `submission` still validate their required keys or
+  URLs.
+- README and `.env.example` document no-secret submission behavior.
+- Verified on 2026-07-06:
+  - `uv run pytest -q` -> `48 passed, 1 warning`
+  - `OMNIMATCH_PROFILE=submission uv run python examples/run_competition_agent.py` -> exits 0 and warns `evidence used provider modes: placeholder`
+
+Remaining: no code work. Only commit/push housekeeping if the local branch needs
+publication.
+
 ## Background
 
 OmniMatch has three runtime profiles: `dev`, `submission`, and `test`. The active

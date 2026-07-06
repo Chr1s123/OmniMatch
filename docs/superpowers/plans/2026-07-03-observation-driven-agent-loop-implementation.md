@@ -2,6 +2,30 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Current Progress - 2026-07-06
+
+Status: implementation complete and verified.
+
+- Current git log includes `a38a073 feat: drive agent loop from llm actions`.
+- `app/agent/actions.py` defines typed tool and terminal actions.
+- `ToolRegistry.snapshot()` is implemented and covered.
+- `PlaceholderLLMProvider` produces the deterministic action sequence
+  `plan -> category_insight -> item_search -> shipping -> rank -> pick -> finish`.
+- `CompetitionAgentLoop.run()` now asks the configured LLM provider for each
+  action, emits thought/provider/tool/ranking/result events, handles
+  `finish`, `clarify`, `fail`, and emits budget exhaustion via `max_steps`.
+- Output persistence writes `summary.json`, `candidates.json`, and `trace.jsonl`.
+- Verification rerun on 2026-07-06:
+  - `uv run pytest -q` -> `48 passed, 1 warning`
+  - `OMNIMATCH_PROFILE=submission uv run python examples/run_competition_agent.py` -> exits 0
+
+Remaining follow-up:
+
+- Add `provider_calls.jsonl` if separate provider-call audit output is still
+  required by the competition trace contract.
+- Expand dynamic-agent tests around malformed real LLM output and provider
+  partial failures.
+
 **Goal:** Replace the current fixed `plan -> category_insight -> item_search -> shipping -> rank -> pick` sequence with an observation-driven loop that asks the configured LLM provider for the next action, reacts to observations, and terminates with either a recommendation, clarification request, provider failure, or budget exhaustion.
 
 **Architecture:** Keep existing provider, tool, API, frontend, ranking, and trace surfaces. Add a small action/state model beside `CompetitionAgentLoop`, normalize LLM action proposals before tool execution, then make `CompetitionAgentLoop.run()` iterate until a terminal action or budget limit is reached. Tests use deterministic fake providers so `test` and `submission` remain offline.

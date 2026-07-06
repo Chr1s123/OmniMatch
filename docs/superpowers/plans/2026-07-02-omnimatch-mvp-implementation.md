@@ -2,6 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Current Progress - 2026-07-06
+
+Status: completed as historical scaffold and superseded by the competition-agent
+plans.
+
+- Backend schemas, tools, API, WebSocket path, examples, and tests exist.
+- Frontend React/Vite console exists and builds successfully.
+- The active runtime is now `CompetitionAgentLoop`; `MockAgentLoop` is retained
+  as an alias for compatibility.
+- Verification rerun on 2026-07-06:
+  - `uv run pytest -q` -> `48 passed, 1 warning`
+  - `cd frontend && npm run build` -> exits 0
+
 **Goal:** Build a runnable mock OmniMatch MVP with a complete teaching skeleton, FastAPI backend, WebSocket AGUI-style events, mock AgentLoop/tool chain, and React/Vite frontend console.
 
 **Architecture:** The backend exposes task HTTP/WebSocket APIs and runs an in-memory async mock AgentLoop. Tools return Pydantic schemas, dispatch simulates homogeneous forked sub-agents, and the frontend stays thin by rendering events and final results from backend messages.

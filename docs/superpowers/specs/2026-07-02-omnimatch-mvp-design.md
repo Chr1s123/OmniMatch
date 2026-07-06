@@ -5,6 +5,17 @@
 > agent design in
 > `docs/superpowers/specs/2026-07-03-competition-agent-design.md`.
 
+## Current Progress - 2026-07-06
+
+Status: completed as historical scaffold and superseded.
+
+- The FastAPI task API, WebSocket event path, React/Vite frontend, mock-compatible
+  `MockAgentLoop` alias, schemas, tools, examples, and output directories exist.
+- The implementation has moved beyond this MVP into the provider-backed
+  `CompetitionAgentLoop`.
+- Do not use this spec as the active roadmap except when checking historical MVP
+  acceptance criteria.
+
 ## Background
 
 OmniMatch is a conversational cross-platform shopping Agent. The long-term product described in `idea.md` includes a main AgentLoop, homogeneous forked sub-AgentLoops, nine core tools, vector recall, long-term memory, context compression, AGUI events, and an evaluation/training loop.
