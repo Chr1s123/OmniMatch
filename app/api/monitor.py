@@ -44,8 +44,15 @@ class EventCollector:
             payload=payload or {},
         )
         self.events.append(event)
-        if self._sink:
-            await self._sink(event)
+        try:
+            if self._sink:
+                await self._sink(event)
+        except BaseException:
+            for index, recorded_event in enumerate(self.events):
+                if recorded_event is event:
+                    del self.events[index]
+                    break
+            raise
         return event
 
 

@@ -571,6 +571,7 @@ async def test_fork_executor_timeout_includes_slow_start_emission():
     assert [(result.task_id, result.status) for result in results] == [("slow_start", "timed_out")]
     assert runner_started.is_set() is False
     assert emit_attempts == ["subagent_started"]
+    assert not any(event.type == "subagent_started" for event in monitor.events)
 
 
 @pytest.mark.asyncio
@@ -615,6 +616,10 @@ async def test_fork_executor_timeout_includes_slow_finish_emission():
     assert [(result.task_id, result.status) for result in results] == [("slow_finish", "timed_out")]
     assert runner_stopped.is_set()
     assert emit_attempts == ["subagent_started", "subagent_finished"]
+    assert not any(
+        event.type == "subagent_finished" and event.payload["status"] == "completed"
+        for event in monitor.events
+    )
 
 
 @pytest.mark.asyncio
@@ -826,6 +831,29 @@ async def test_scoped_event_collector_enriches_child_events():
         "subagent_id": "amazon",
         "fork_depth": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_event_collector_rolls_back_exact_event_identity_when_sink_fails():
+    emitted_event = None
+    equal_event = None
+
+    async def failing_sink(event) -> None:
+        nonlocal emitted_event, equal_event
+        emitted_event = event
+        equal_event = event.model_copy(deep=True)
+        monitor.events.insert(0, equal_event)
+        raise RuntimeError("delivery failed")
+
+    monitor = EventCollector(thread_id="thread_transactional_event", sink=failing_sink)
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await monitor.emit("tool_start", "search", tool="item_search")
+
+    assert equal_event == emitted_event
+    assert equal_event is not emitted_event
+    assert len(monitor.events) == 1
+    assert monitor.events[0] is equal_event
 
 
 @pytest.mark.asyncio
