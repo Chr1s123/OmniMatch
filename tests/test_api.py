@@ -1,8 +1,24 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from app.api.server import app
-from app.api.server import TASKS
+import app.api.server as server
+from app.api.monitor import EventCollector
+from app.api.server import app, TASKS
+from app.config import OmniMatchSettings
 from app.schemas import AgentEvent, TaskState
+
+
+def submission_settings() -> OmniMatchSettings:
+    return OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
 
 
 def test_create_task_returns_thread_id(monkeypatch):
@@ -70,3 +86,40 @@ def test_unknown_websocket_thread_is_rejected():
             raise AssertionError("unknown websocket should not stay connected")
     except Exception as exc:
         assert "1008" in str(exc) or "WebSocketDisconnect" in exc.__class__.__name__
+
+
+@pytest.mark.asyncio
+async def test_run_task_uses_task_state_events_as_single_canonical_store(monkeypatch, tmp_path):
+    thread_id = "thread_canonical_events"
+    state = TaskState(thread_id=thread_id, query="旅行三件套，预算300")
+    TASKS[thread_id] = state
+    collectors: list[EventCollector] = []
+    broadcast_events: list[AgentEvent] = []
+
+    class CapturingEventCollector(EventCollector):
+        def __init__(self, thread_id, sink=None, events=None):
+            super().__init__(thread_id, sink=sink, events=events)
+            collectors.append(self)
+
+    async def record_broadcast(event: AgentEvent) -> None:
+        broadcast_events.append(event)
+
+    monkeypatch.setattr(server, "EventCollector", CapturingEventCollector)
+    monkeypatch.setattr(server.manager, "broadcast", record_broadcast)
+
+    try:
+        await server._run_task(
+            thread_id,
+            state.query or "",
+            tmp_path / thread_id,
+            submission_settings(),
+        )
+    finally:
+        TASKS.pop(thread_id, None)
+
+    assert len(collectors) == 1
+    assert collectors[0].events is state.events
+    assert len(state.events) == len(broadcast_events)
+    assert all(replayed is delivered for replayed, delivered in zip(state.events, broadcast_events))
+    assert len({id(event) for event in state.events}) == len(state.events)
+    assert state.status == "completed"

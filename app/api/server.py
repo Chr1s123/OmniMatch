@@ -76,12 +76,12 @@ async def _run_task(
     session_dir: Path,
     settings: OmniMatchSettings,
 ) -> None:
+    state = TASKS[thread_id]
+
     async def sink(event: AgentEvent) -> None:
-        state = TASKS[thread_id]
-        state.events.append(event)
         await manager.broadcast(event)
 
-    monitor = EventCollector(thread_id=thread_id, sink=sink)
+    monitor = EventCollector(thread_id=thread_id, sink=sink, events=state.events)
     loop = CompetitionAgentLoop(
         thread_id=thread_id,
         session_dir=session_dir,
@@ -91,7 +91,6 @@ async def _run_task(
     )
     try:
         summary = await loop.run(query)
-        state = TASKS[thread_id]
         state.status = "completed"
         state.result = summary
         state.trace_paths = {

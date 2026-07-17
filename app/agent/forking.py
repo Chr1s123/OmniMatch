@@ -272,15 +272,18 @@ class ForkExecutor:
                     error=_safe_error(exc),
                     elapsed_ms=int((perf_counter() - started) * 1000),
                 )
-            await _await_before_deadline(
-                lambda: self.monitor.emit(
-                    "subagent_finished",
-                    f"Sub-agent {request.task_id} finished with {result.status}.",
-                    tool="fork",
-                    payload=result.model_dump(),
-                ),
-                deadline,
-            )
+            try:
+                await _await_before_deadline(
+                    lambda: self.monitor.emit(
+                        "subagent_finished",
+                        f"Sub-agent {request.task_id} finished with {result.status}.",
+                        tool="fork",
+                        payload=result.model_dump(),
+                    ),
+                    deadline,
+                )
+            except _SubAgentDeadlineExceeded:
+                return result
             return result
         except _SubAgentDeadlineExceeded:
             return self._timed_out_result(request, started)

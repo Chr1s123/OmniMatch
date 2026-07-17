@@ -22,10 +22,15 @@ class EventEmitter(Protocol):
 
 
 class EventCollector:
-    def __init__(self, thread_id: str, sink: EventSink | None = None) -> None:
+    def __init__(
+        self,
+        thread_id: str,
+        sink: EventSink | None = None,
+        events: list[AgentEvent] | None = None,
+    ) -> None:
         self.thread_id = thread_id
         self.run_id = f"run_{uuid4().hex[:8]}"
-        self.events: list[AgentEvent] = []
+        self.events = events if events is not None else []
         self._sink = sink
 
     async def emit(

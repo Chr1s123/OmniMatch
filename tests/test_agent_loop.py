@@ -613,13 +613,61 @@ async def test_fork_executor_timeout_includes_slow_finish_emission():
     results = await asyncio.wait_for(execution, timeout=0.25)
     await asyncio.wait_for(finish_emit_stopped.wait(), timeout=1)
 
-    assert [(result.task_id, result.status) for result in results] == [("slow_finish", "timed_out")]
+    assert [(result.task_id, result.status) for result in results] == [("slow_finish", "completed")]
     assert runner_stopped.is_set()
     assert emit_attempts == ["subagent_started", "subagent_finished"]
     assert not any(
         event.type == "subagent_finished" and event.payload["status"] == "completed"
         for event in monitor.events
     )
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_partial_finish_delivery_preserves_computed_status():
+    canonical_events = []
+    delivered_payloads: list[dict] = []
+    finish_delivery_started = asyncio.Event()
+    finish_delivery_stopped = asyncio.Event()
+    block_remaining_delivery = asyncio.Event()
+
+    async def partially_delivering_sink(event) -> None:
+        if event.type != "subagent_finished":
+            return
+        delivered_payloads.append(dict(event.payload))
+        finish_delivery_started.set()
+        try:
+            await block_remaining_delivery.wait()
+        finally:
+            finish_delivery_stopped.set()
+
+    monitor = EventCollector(
+        thread_id="thread_partial_finish_delivery",
+        sink=partially_delivering_sink,
+        events=canonical_events,
+    )
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    request = ForkRequest(
+        task_id="partial_finish",
+        objective="runner completes before notification deadline",
+        allowed_tools=["plan"],
+        context_snapshot={},
+        max_steps=1,
+        timeout_seconds=0.02,
+        merge_key="products",
+    )
+
+    async def runner(_: ForkRequest) -> SubAgentPayload:
+        return SubAgentPayload(result={"computed": True}, step_count=1)
+
+    execution = asyncio.create_task(executor.execute([request], runner))
+    await asyncio.wait_for(finish_delivery_started.wait(), timeout=1)
+    result = (await asyncio.wait_for(execution, timeout=0.25))[0]
+    await asyncio.wait_for(finish_delivery_stopped.wait(), timeout=1)
+
+    assert result.status == "completed"
+    assert result.result == {"computed": True}
+    assert delivered_payloads[0]["status"] == result.status
+    assert [event.type for event in canonical_events] == ["subagent_started"]
 
 
 @pytest.mark.asyncio
@@ -835,6 +883,7 @@ async def test_scoped_event_collector_enriches_child_events():
 
 @pytest.mark.asyncio
 async def test_event_collector_rolls_back_exact_event_identity_when_sink_fails():
+    replay_events = []
     emitted_event = None
     equal_event = None
 
@@ -845,11 +894,16 @@ async def test_event_collector_rolls_back_exact_event_identity_when_sink_fails()
         monitor.events.insert(0, equal_event)
         raise RuntimeError("delivery failed")
 
-    monitor = EventCollector(thread_id="thread_transactional_event", sink=failing_sink)
+    monitor = EventCollector(
+        thread_id="thread_transactional_event",
+        sink=failing_sink,
+        events=replay_events,
+    )
 
     with pytest.raises(RuntimeError, match="delivery failed"):
         await monitor.emit("tool_start", "search", tool="item_search")
 
+    assert monitor.events is replay_events
     assert equal_event == emitted_event
     assert equal_event is not emitted_event
     assert len(monitor.events) == 1
