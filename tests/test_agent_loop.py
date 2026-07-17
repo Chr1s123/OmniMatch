@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 
 import pytest
@@ -65,6 +66,132 @@ class SequenceLLMProvider:
             latency_ms=1,
             data=self.actions[index],
             response_summary=f"sequence action {index}",
+        )
+
+
+class ForkAwareLLMProvider(SequenceLLMProvider):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.planner_states: dict[str, list[dict]] = {}
+        self.system_prompts: dict[str, list[str]] = {}
+
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if system_prompt.startswith("Extract shopping intent"):
+            return await super().plan_next_action(messages)
+
+        self.calls.append(messages)
+        self.action_calls.append(messages)
+        state = json.loads(messages[1]["content"])
+        query = state["query"]
+        completed = state["completed_actions"]
+        self.planner_states.setdefault(query, []).append(state)
+        self.system_prompts.setdefault(query, []).append(system_prompt)
+        if not completed:
+            data = {"action": "plan", "arguments": {}, "thought": "Plan first."}
+        elif query == "parent" and completed == ["plan"]:
+            data = {
+                "action": "fork",
+                "thought": "Split independent platform checks.",
+                "arguments": {
+                    "tasks": [
+                        {
+                            "task_id": "ebay",
+                            "objective": "child-ebay",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {
+                                "platform": "eBay",
+                                "filters": {"regions": ["US"]},
+                            },
+                            "merge_key": "products",
+                        },
+                        {
+                            "task_id": "amazon",
+                            "objective": "child-amazon",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {
+                                "platform": "Amazon",
+                                "filters": {"regions": ["US"]},
+                            },
+                            "merge_key": "products",
+                        },
+                    ]
+                },
+            }
+        else:
+            data = {"action": "finish", "message": "scope complete"}
+        return ProviderResult(
+            provider="fork_llm",
+            provider_mode="fake",
+            latency_ms=1,
+            data=data,
+        )
+
+
+class NestedForkLLMProvider(SequenceLLMProvider):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.planner_states: dict[str, list[dict]] = {}
+        self.system_prompts: dict[str, list[str]] = {}
+
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if system_prompt.startswith("Extract shopping intent"):
+            return await super().plan_next_action(messages)
+
+        self.calls.append(messages)
+        self.action_calls.append(messages)
+        state = json.loads(messages[1]["content"])
+        query = state["query"]
+        completed = state["completed_actions"]
+        self.planner_states.setdefault(query, []).append(state)
+        self.system_prompts.setdefault(query, []).append(system_prompt)
+        if not completed:
+            data = {"action": "plan", "arguments": {}, "thought": "Plan first."}
+        elif query == "parent" and completed == ["plan"]:
+            data = {
+                "action": "fork",
+                "arguments": {
+                    "tasks": [
+                        {
+                            "task_id": "child",
+                            "objective": "child",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {"level": 1},
+                            "merge_key": "children",
+                        }
+                    ]
+                },
+            }
+        elif query == "child" and completed == ["plan"]:
+            data = {
+                "action": "fork",
+                "arguments": {
+                    "tasks": [
+                        {
+                            "task_id": "grandchild_b",
+                            "objective": "grandchild-b",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {"level": 2, "slot": "b"},
+                            "merge_key": "grandchildren",
+                        },
+                        {
+                            "task_id": "grandchild_a",
+                            "objective": "grandchild-a",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {"level": 2, "slot": "a"},
+                            "merge_key": "grandchildren",
+                        },
+                    ]
+                },
+            }
+        else:
+            data = {"action": "finish", "message": "scope complete"}
+        return ProviderResult(
+            provider="nested_fork_llm",
+            provider_mode="fake",
+            latency_ms=1,
+            data=data,
         )
 
 
@@ -563,6 +690,171 @@ def test_fork_request_rejects_non_json_snapshot_value():
             },
             submission_settings(),
         )
+
+
+@pytest.mark.asyncio
+async def test_main_loop_forks_same_loop_and_isolates_child_state(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    llm = ForkAwareLLMProvider()
+    providers = ProviderRegistry(
+        llm=llm,
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_homogeneous")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_homogeneous",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    starts = [event for event in monitor.events if event.type == "subagent_started"]
+    task_starts = [event for event in monitor.events if event.type == "task_started"]
+    task_results = [event for event in monitor.events if event.type == "task_result"]
+    assert [event.payload["subagent_id"] for event in starts] == ["ebay", "amazon"]
+    assert len(task_starts) == 1
+    assert len(task_results) == 1
+
+    root_rows = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    root_fork = next(
+        observation
+        for row in root_rows
+        for observation in row["observations"]
+        if observation["tool"] == "fork"
+    )
+    assert [result["task_id"] for result in root_fork["subagents"]] == ["amazon", "ebay"]
+    assert [result["status"] for result in root_fork["subagents"]] == [
+        "completed",
+        "completed",
+    ]
+
+    assert llm.planner_states["child-amazon"][0]["fork_depth"] == 1
+    assert llm.planner_states["child-amazon"][0]["context_snapshot"] == {
+        "platform": "Amazon",
+        "filters": {"regions": ["US"]},
+    }
+    assert "Allowed orchestration action: fork." in llm.system_prompts["parent"][0]
+    assert "Fork is not allowed at this depth." in llm.system_prompts["child-amazon"][0]
+
+    parent_fork = next(
+        observation for observation in loop.last_observations if observation["tool"] == "fork"
+    )
+    assert [result["task_id"] for result in parent_fork["subagents"]] == ["amazon", "ebay"]
+    for result in parent_fork["subagents"]:
+        assert result["observations"] is not loop.last_observations
+        assert not any(observation["tool"] == "fork" for observation in result["observations"])
+
+    for task_id in ("amazon", "ebay"):
+        child_dir = tmp_path / "subagents" / task_id
+        assert (child_dir / "summary.json").exists()
+        child_rows = [
+            json.loads(line)
+            for line in (child_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert [row["action"] for row in child_rows] == ["plan", "finish"]
+    assert [row["action"] for row in root_rows] == ["plan", "fork", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_child_fork_at_depth_limit_returns_sorted_failures_without_grandchildren(tmp_path):
+    settings = replace(submission_settings(), max_fork_depth=1)
+    base = ProviderRegistry.from_settings(settings)
+    llm = NestedForkLLMProvider()
+    providers = ProviderRegistry(
+        llm=llm,
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_depth_limit")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_depth_limit",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    starts = [event for event in monitor.events if event.type == "subagent_started"]
+    assert [(event.payload["subagent_id"], event.payload["fork_depth"]) for event in starts] == [
+        ("child", 1)
+    ]
+    child_rows = [
+        json.loads(line)
+        for line in (tmp_path / "subagents" / "child" / "trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    rejected_fork = next(
+        observation
+        for row in child_rows
+        for observation in row["observations"]
+        if observation["tool"] == "fork"
+    )
+    assert [result["task_id"] for result in rejected_fork["subagents"]] == [
+        "grandchild_a",
+        "grandchild_b",
+    ]
+    assert {result["status"] for result in rejected_fork["subagents"]} == {"failed"}
+    assert all(
+        "fork depth 2 exceeds max_fork_depth=1" in result["error"]
+        for result in rejected_fork["subagents"]
+    )
+    assert "Fork is not allowed at this depth." in llm.system_prompts["child"][0]
+    assert not (tmp_path / "subagents" / "child" / "subagents").exists()
+    assert len([event for event in monitor.events if event.type == "task_result"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_nested_fork_lifecycle_events_keep_current_task_and_depth(tmp_path):
+    settings = replace(submission_settings(), max_fork_depth=2)
+    base = ProviderRegistry.from_settings(settings)
+    providers = ProviderRegistry(
+        llm=NestedForkLLMProvider(),
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_nested_events")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_nested_events",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    starts = {
+        (event.payload["subagent_id"], event.payload["fork_depth"])
+        for event in monitor.events
+        if event.type == "subagent_started"
+    }
+    finishes = {
+        (event.payload["task_id"], event.payload["fork_depth"])
+        for event in monitor.events
+        if event.type == "subagent_finished"
+    }
+    assert starts == {
+        ("child", 1),
+        ("grandchild_a", 2),
+        ("grandchild_b", 2),
+    }
+    assert finishes == starts
+    assert len([event for event in monitor.events if event.type == "task_started"]) == 1
+    assert len([event for event in monitor.events if event.type == "task_result"]) == 1
 
 
 @pytest.mark.asyncio

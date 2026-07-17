@@ -5,9 +5,17 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.actions import AgentAction, AgentStep
+from app.agent.forking import (
+    AgentScope,
+    ForkExecutor,
+    ForkRequest,
+    SubAgentPayload,
+    SubAgentResult,
+    thaw_context_snapshot,
+)
 from app.agent.tool_registry import ToolRegistry
 from app.api.context import set_task_context
-from app.api.monitor import EventCollector
+from app.api.monitor import EventEmitter, ScopedEventCollector
 from app.config import OmniMatchSettings
 from app.providers.registry import ProviderRegistry
 from app.schemas import ShoppingSummary
@@ -22,8 +30,9 @@ class CompetitionAgentLoop:
         session_dir: str | Path,
         settings: OmniMatchSettings,
         providers: ProviderRegistry,
-        monitor: EventCollector,
+        monitor: EventEmitter,
         max_steps: int = 8,
+        scope: AgentScope | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.session_dir = Path(session_dir)
@@ -31,25 +40,29 @@ class CompetitionAgentLoop:
         self.providers = providers
         self.monitor = monitor
         self.max_steps = max_steps
+        self.scope = scope or AgentScope()
+        self.last_observations: list[dict[str, Any]] = []
+        self.last_step_count = 0
 
     async def run(self, query: str) -> ShoppingSummary:
         set_task_context(self.thread_id, self.session_dir)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         ctx = ToolContext(settings=self.settings, providers=self.providers)
-        tools = ToolRegistry(ctx)
+        tools = ToolRegistry(ctx, allowed_tools=self.scope.allowed_tools)
         trace: list[dict[str, Any]] = []
         steps: list[AgentStep] = []
         picked = None
         terminal_note = ""
 
-        await self.monitor.emit(
-            "task_started",
-            "Competition Agent started.",
-            payload={
-                "profile": self.settings.profile,
-                "provider_modes": self.settings.provider_modes(),
-            },
-        )
+        if self.scope.emit_task_result:
+            await self.monitor.emit(
+                "task_started",
+                "Competition Agent started.",
+                payload={
+                    "profile": self.settings.profile,
+                    "provider_modes": self.settings.provider_modes(),
+                },
+            )
 
         for step_index in range(self.max_steps):
             action, planner_observation = await self._plan_next_action(
@@ -104,6 +117,26 @@ class CompetitionAgentLoop:
                 await self.monitor.emit("task_error", terminal_note)
                 break
 
+            if action.name == "fork":
+                results = await self._execute_fork(action)
+                observation = {
+                    "tool": "fork",
+                    "subagents": [result.model_dump() for result in results],
+                }
+                ctx.observations.append(observation)
+                step_observations = [planner_observation, observation]
+                steps.append(
+                    AgentStep(
+                        action=action,
+                        observation_count=len(ctx.observations),
+                        observations=step_observations,
+                    )
+                )
+                trace.append(
+                    self._trace_row(action, step_observations, len(ctx.observations))
+                )
+                continue
+
             await self.monitor.emit("tool_start", f"{action.name} started", tool=action.name)
             observation_start = len(ctx.observations)
             result = await tools.run(action.name, self._tool_arguments(action, query))
@@ -134,6 +167,8 @@ class CompetitionAgentLoop:
             terminal_note = f"Reached max_steps={self.max_steps} before a finish action."
             await self.monitor.emit("task_error", terminal_note)
 
+        self.last_observations = list(ctx.observations)
+        self.last_step_count = len(steps)
         summary = await build_summary(query, picked or [], ctx, status_note=terminal_note)
         try:
             self._write_json("summary.json", summary.model_dump())
@@ -146,12 +181,77 @@ class CompetitionAgentLoop:
                 f"Output persistence failed: {exc}",
                 payload={"warning": str(exc)},
             )
-        await self.monitor.emit(
-            "task_result",
-            "Shopping summary generated.",
-            payload={"summary": summary.model_dump()},
-        )
+        if self.scope.emit_task_result:
+            await self.monitor.emit(
+                "task_result",
+                "Shopping summary generated.",
+                payload={"summary": summary.model_dump()},
+            )
         return summary
+
+    async def _execute_fork(self, action: AgentAction) -> list[SubAgentResult]:
+        requests = ForkRequest.parse_many(action.arguments, self.settings)
+        child_depth = self.scope.depth + 1
+        if child_depth > self.settings.max_fork_depth:
+            return sorted(
+                [
+                    SubAgentResult(
+                        task_id=request.task_id,
+                        status="failed",
+                        error=(
+                            f"fork depth {child_depth} exceeds "
+                            f"max_fork_depth={self.settings.max_fork_depth}"
+                        ),
+                    )
+                    for request in requests
+                ],
+                key=lambda result: result.task_id,
+            )
+
+        root_monitor = (
+            self.monitor.parent
+            if isinstance(self.monitor, ScopedEventCollector)
+            else self.monitor
+        )
+        executor = ForkExecutor(
+            monitor=ScopedEventCollector(root_monitor, {"fork_depth": child_depth}),
+            max_parallel=self.settings.max_parallel_subagents,
+        )
+
+        async def run_child(request: ForkRequest) -> SubAgentPayload:
+            child = CompetitionAgentLoop(
+                thread_id=self.thread_id,
+                session_dir=self.session_dir / "subagents" / request.task_id,
+                settings=self.settings,
+                providers=self.providers,
+                monitor=ScopedEventCollector(
+                    root_monitor,
+                    {
+                        "subagent_id": request.task_id,
+                        "fork_depth": child_depth,
+                    },
+                ),
+                max_steps=request.max_steps,
+                scope=AgentScope(
+                    depth=child_depth,
+                    task_id=request.task_id,
+                    allowed_tools=frozenset(request.allowed_tools),
+                    emit_task_result=False,
+                    context_snapshot=request.context_snapshot,
+                ),
+            )
+            summary = await child.run(request.objective)
+            return SubAgentPayload(
+                result={
+                    "merge_key": request.merge_key,
+                    "summary": summary.model_dump(),
+                },
+                observations=child.last_observations,
+                warnings=summary.warnings,
+                step_count=child.last_step_count,
+            )
+
+        return await executor.execute(requests, run_child)
 
     async def _plan_next_action(
         self,
@@ -161,6 +261,11 @@ class CompetitionAgentLoop:
         ctx: ToolContext,
         steps: list[AgentStep],
     ) -> tuple[AgentAction, dict[str, Any]]:
+        fork_instruction = (
+            "Allowed orchestration action: fork. "
+            if self.scope.depth < self.settings.max_fork_depth
+            else "Fork is not allowed at this depth. "
+        )
         result = await self.providers.llm.plan_next_action(
             [
                 {
@@ -168,6 +273,7 @@ class CompetitionAgentLoop:
                     "content": (
                         "Choose the next shopping-agent action as JSON. Allowed tool actions: "
                         "plan, category_insight, item_search, shipping, rank, pick. "
+                        f"{fork_instruction}"
                         "Allowed terminal actions: finish, clarify, fail. "
                         "Return action, arguments, thought, and optional message."
                     ),
@@ -181,6 +287,10 @@ class CompetitionAgentLoop:
                             "tool_state": tools.snapshot(),
                             "recent_observations": ctx.observations[-5:],
                             "completed_actions": [step.action.name for step in steps],
+                            "fork_depth": self.scope.depth,
+                            "context_snapshot": thaw_context_snapshot(
+                                self.scope.context_snapshot
+                            ),
                         },
                         ensure_ascii=False,
                     ),
