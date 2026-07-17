@@ -9,3 +9,4 @@ frontend/tsconfig.tsbuildinfo
 
 .env
 output/thread_*/
+.worktrees/
