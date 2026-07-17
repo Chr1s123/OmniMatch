@@ -50,6 +50,15 @@ def test_fork_settings_reject_non_positive_limits():
         settings.validate()
 
 
+@pytest.mark.parametrize("timeout", ["nan", "inf"])
+def test_fork_settings_reject_non_finite_timeout(monkeypatch, timeout):
+    monkeypatch.setenv("OMNIMATCH_PROFILE", "submission")
+    monkeypatch.setenv("OMNIMATCH_SUBAGENT_TIMEOUT_SECONDS", timeout)
+
+    with pytest.raises(ConfigError, match="subagent_timeout_seconds"):
+        OmniMatchSettings.from_env()
+
+
 def clear_omnimatch_env(monkeypatch):
     monkeypatch.setattr("app.config.load_dotenv", lambda: None)
     for key in list(os.environ):

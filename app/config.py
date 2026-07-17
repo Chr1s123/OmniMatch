@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -136,7 +137,7 @@ class OmniMatchSettings:
             raise ConfigError("max_parallel_subagents must be >= 1")
         if self.subagent_max_steps < 1:
             raise ConfigError("subagent_max_steps must be >= 1")
-        if self.subagent_timeout_seconds <= 0:
+        if not math.isfinite(self.subagent_timeout_seconds) or self.subagent_timeout_seconds <= 0:
             raise ConfigError("subagent_timeout_seconds must be > 0")
         if self.profile == "test":
             return
