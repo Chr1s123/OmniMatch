@@ -11,7 +11,7 @@ from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.actions import TOOL_ACTIONS
 from app.api.monitor import EventEmitter
@@ -19,6 +19,7 @@ from app.config import OmniMatchSettings
 
 
 SubAgentStatus = Literal["completed", "failed", "cancelled", "timed_out"]
+SubAgentPayloadStatus = Literal["completed", "failed"]
 _T = TypeVar("_T")
 
 
@@ -179,20 +180,28 @@ class SubAgentResult(BaseModel):
 
 
 class SubAgentPayload(BaseModel):
+    status: SubAgentPayloadStatus = "completed"
     result: dict[str, Any]
     observations: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
     step_count: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_failed_error(self) -> "SubAgentPayload":
+        if self.status == "failed" and not self.error:
+            raise ValueError("failed sub-agent payload requires an error")
+        return self
 
 
 SubAgentRunner = Callable[[ForkRequest], Awaitable[SubAgentPayload]]
 
 
-def _safe_error(exc: Exception) -> str:
+def sanitize_subagent_error(error: object) -> str:
     text = re.sub(
         r"(?i)\b(bearer|basic)(\s+)\S+",
         r"\1\2[REDACTED]",
-        str(exc),
+        str(error),
     )
     return re.sub(
         (
@@ -254,10 +263,15 @@ class ForkExecutor:
                 )
                 result = SubAgentResult(
                     task_id=request.task_id,
-                    status="completed",
+                    status=payload.status,
                     result=payload.result,
                     observations=payload.observations,
                     warnings=payload.warnings,
+                    error=(
+                        sanitize_subagent_error(payload.error)
+                        if payload.error is not None
+                        else None
+                    ),
                     step_count=payload.step_count,
                     elapsed_ms=int((perf_counter() - started) * 1000),
                 )
@@ -269,7 +283,7 @@ class ForkExecutor:
                 result = SubAgentResult(
                     task_id=request.task_id,
                     status="failed",
-                    error=_safe_error(exc),
+                    error=sanitize_subagent_error(exc),
                     elapsed_ms=int((perf_counter() - started) * 1000),
                 )
             try:

@@ -81,10 +81,10 @@ Expected:
 Run:
 
 ```bash
-/Users/chris/develop/OmniMatch/.venv/bin/python -c 'from app.config import OmniMatchSettings; s = OmniMatchSettings.from_env(); print({"profile": s.profile, "llm_model": s.llm_model, "providers": {"llm": s.llm_provider, "product": s.product_provider, "web_search": s.web_search_provider, "shipping": s.shipping_provider, "memory": s.memory_provider, "eval": s.eval_provider}, "modes": s.provider_modes()})'
+/Users/chris/develop/OmniMatch/.venv/bin/python -c 'from app.config import OmniMatchSettings; s = OmniMatchSettings.from_env(); assert s.profile == "dev"; assert s.llm_model == "qwen3.5-flash"; print({"providers": {"llm": s.llm_provider, "product": s.product_provider, "web_search": s.web_search_provider, "shipping": s.shipping_provider, "memory": s.memory_provider, "eval": s.eval_provider}, "modes": s.provider_modes()})'
 ```
 
-Expected: `profile` is `dev`; providers are `openai`, `serpapi`, `serper`, `rate_table`, `memory`, and `heuristic`; every value in `modes` is `real`. The output contains no secret values.
+Expected: the profile and LLM model assertions pass without printing either value; providers are `openai`, `serpapi`, `serper`, `rate_table`, `memory`, and `heuristic`; every value in `modes` is `real`. The output contains no secret values.
 
 ### Task 2: Make Three Minimal Real Provider Requests
 

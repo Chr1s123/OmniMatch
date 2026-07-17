@@ -188,6 +188,58 @@ class BudgetForkLLMProvider(SequenceLLMProvider):
         )
 
 
+class ImmediateForkLLMProvider(SequenceLLMProvider):
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if system_prompt.startswith("Extract shopping intent"):
+            return await super().plan_next_action(messages)
+
+        self.calls.append(messages)
+        self.action_calls.append(messages)
+        state = json.loads(messages[1]["content"])
+        if state["query"] == "parent" and not state["completed_actions"]:
+            data = {
+                "action": "fork",
+                "arguments": {
+                    "tasks": [
+                        {
+                            "task_id": "first_step_child",
+                            "objective": "child",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {},
+                            "merge_key": "products",
+                        }
+                    ]
+                },
+            }
+        else:
+            data = {"action": "finish", "message": "scope complete"}
+        return ProviderResult(
+            provider="immediate_fork_llm",
+            provider_mode="fake",
+            latency_ms=1,
+            data=data,
+        )
+
+
+class TerminalFailForkLLMProvider(ForkAwareLLMProvider):
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if not system_prompt.startswith("Extract shopping intent"):
+            state = json.loads(messages[1]["content"])
+            if state["query"] == "child-amazon":
+                return ProviderResult(
+                    provider="terminal_fail_fork_llm",
+                    provider_mode="fake",
+                    latency_ms=1,
+                    data={
+                        "action": "fail",
+                        "message": "Child could not satisfy objective.",
+                    },
+                )
+        return await super().plan_next_action(messages)
+
+
 class NestedForkLLMProvider(SequenceLLMProvider):
     def __init__(self) -> None:
         super().__init__([])
@@ -427,6 +479,40 @@ async def test_fork_executor_returns_stable_order_and_partial_failures():
     assert [result.task_id for result in results] == ["a", "b"]
     assert [result.status for result in results] == ["completed", "failed"]
     assert results[1].error == "provider failed"
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_preserves_typed_failed_payload_data():
+    executor = ForkExecutor(
+        monitor=EventCollector(thread_id="thread_typed_failure"),
+        max_parallel=1,
+    )
+    request = ForkRequest(
+        task_id="failed_child",
+        objective="fail normally",
+        allowed_tools=["plan"],
+        context_snapshot={},
+        max_steps=1,
+        timeout_seconds=1,
+        merge_key="products",
+    )
+
+    async def runner(_: ForkRequest) -> SubAgentPayload:
+        return SubAgentPayload(
+            status="failed",
+            error="Child could not satisfy objective.",
+            result={"summary": {"status_note": "Child could not satisfy objective."}},
+            observations=[{"tool": "AgentPlanner"}],
+            step_count=1,
+        )
+
+    result = (await executor.execute([request], runner))[0]
+
+    assert result.status == "failed"
+    assert result.error == "Child could not satisfy objective."
+    assert result.result == {"summary": {"status_note": "Child could not satisfy objective."}}
+    assert result.observations == [{"tool": "AgentPlanner"}]
+    assert result.step_count == 1
 
 
 @pytest.mark.asyncio
@@ -989,6 +1075,77 @@ def test_fork_request_rejects_non_json_snapshot_value():
 
 
 @pytest.mark.asyncio
+async def test_root_loop_executes_fork_on_first_step(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    providers = ProviderRegistry(
+        llm=ImmediateForkLLMProvider([]),
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_first_step_fork")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_first_step_fork",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["action"] for row in rows] == ["fork", "finish"]
+    assert [
+        event.payload["subagent_id"] for event in monitor.events if event.type == "subagent_started"
+    ] == ["first_step_child"]
+    assert not [event for event in monitor.events if event.type == "tool_start"]
+
+
+@pytest.mark.asyncio
+async def test_child_terminal_fail_is_scoped_and_returns_failed_result(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    providers = ProviderRegistry(
+        llm=TerminalFailForkLLMProvider(),
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_child_terminal_fail")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_child_terminal_fail",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    fork_observation = next(
+        observation for observation in loop.last_observations if observation["tool"] == "fork"
+    )
+    failed_result = next(
+        result for result in fork_observation["subagents"] if result["task_id"] == "amazon"
+    )
+    child_errors = [event for event in monitor.events if event.type == "subagent_error"]
+    assert failed_result["status"] == "failed"
+    assert failed_result["error"] == "Child could not satisfy objective."
+    assert failed_result["result"]["summary"]["status_note"] == failed_result["error"]
+    assert failed_result["observations"]
+    assert failed_result["step_count"] == 1
+    assert [event.message for event in child_errors] == [failed_result["error"]]
+    assert child_errors[0].payload["subagent_id"] == "amazon"
+    assert child_errors[0].payload["fork_depth"] == 1
+    assert not [event for event in monitor.events if event.type == "task_error"]
+
+
+@pytest.mark.asyncio
 async def test_main_loop_forks_same_loop_and_isolates_child_state(tmp_path):
     settings = submission_settings()
     base = ProviderRegistry.from_settings(settings)
@@ -1163,12 +1320,13 @@ async def test_fork_integration_enforces_lower_child_step_budget_and_reports_exa
         web_search=base.web_search,
         shipping=base.shipping,
     )
+    monitor = EventCollector(thread_id="thread_child_budget")
     loop = CompetitionAgentLoop(
         thread_id="thread_child_budget",
         session_dir=tmp_path,
         settings=settings,
         providers=providers,
-        monitor=EventCollector(thread_id="thread_child_budget"),
+        monitor=monitor,
     )
 
     await loop.run("parent")
@@ -1186,11 +1344,17 @@ async def test_fork_integration_enforces_lower_child_step_budget_and_reports_exa
     assert settings.subagent_max_steps == 4
     assert len(llm.planner_states["budget-child"]) == 2
     assert [row["action"] for row in child_trace] == ["plan", "plan"]
-    assert child_result["status"] == "completed"
+    assert child_result["status"] == "failed"
+    assert child_result["error"] == "Reached max_steps=2 before a finish action."
     assert child_result["step_count"] == 2
     assert child_result["result"]["summary"]["status_note"] == (
         "Reached max_steps=2 before a finish action."
     )
+    child_errors = [event for event in monitor.events if event.type == "subagent_error"]
+    assert len(child_errors) == 1
+    assert child_errors[0].payload["subagent_id"] == "budget_child"
+    assert child_errors[0].payload["fork_depth"] == 1
+    assert not [event for event in monitor.events if event.type == "task_error"]
 
 
 @pytest.mark.asyncio
@@ -1420,6 +1584,35 @@ async def test_competition_loop_can_request_clarification(tmp_path):
     assert "请补充预算和商品类别" in summary.message
     assert [event.type for event in monitor.events if event.type == "tool_start"] == []
     assert "task_result" in [event.type for event in monitor.events]
+
+
+@pytest.mark.asyncio
+async def test_root_terminal_fail_emits_only_root_task_error(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    providers = ProviderRegistry(
+        llm=SequenceLLMProvider(
+            [{"action": "fail", "message": "Root could not satisfy objective."}]
+        ),
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_root_fail")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_root_fail",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("root")
+
+    task_errors = [event for event in monitor.events if event.type == "task_error"]
+    assert [event.message for event in task_errors] == ["Root could not satisfy objective."]
+    assert task_errors[0].payload == {}
+    assert not [event for event in monitor.events if event.type == "subagent_error"]
 
 
 @pytest.mark.asyncio

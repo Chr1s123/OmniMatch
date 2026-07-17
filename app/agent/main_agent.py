@@ -11,6 +11,8 @@ from app.agent.forking import (
     ForkRequest,
     SubAgentPayload,
     SubAgentResult,
+    SubAgentPayloadStatus,
+    sanitize_subagent_error,
     thaw_context_snapshot,
 )
 from app.agent.tool_registry import ToolRegistry
@@ -46,6 +48,8 @@ class CompetitionAgentLoop:
         self.scope = scope or AgentScope()
         self.last_observations: list[dict[str, Any]] = []
         self.last_step_count = 0
+        self.last_status: SubAgentPayloadStatus = "completed"
+        self.last_error: str | None = None
 
     async def run(self, query: str) -> ShoppingSummary:
         set_task_context(self.thread_id, self.session_dir)
@@ -56,6 +60,8 @@ class CompetitionAgentLoop:
         steps: list[AgentStep] = []
         picked = None
         terminal_note = ""
+        self.last_status = "completed"
+        self.last_error = None
 
         if self.scope.emit_task_result:
             await self.monitor.emit(
@@ -109,6 +115,7 @@ class CompetitionAgentLoop:
 
             if action.name == "fail":
                 terminal_note = action.message or "代理无法继续执行。"
+                terminal_note = await self._emit_terminal_error(terminal_note)
                 steps.append(
                     AgentStep(
                         action=action,
@@ -117,7 +124,6 @@ class CompetitionAgentLoop:
                     )
                 )
                 trace.append(self._trace_row(action, [planner_observation], len(ctx.observations)))
-                await self.monitor.emit("task_error", terminal_note)
                 break
 
             if action.name == "fork":
@@ -166,7 +172,7 @@ class CompetitionAgentLoop:
             trace.append(self._trace_row(action, step_observations, len(ctx.observations)))
         else:
             terminal_note = f"Reached max_steps={self.max_steps} before a finish action."
-            await self.monitor.emit("task_error", terminal_note)
+            terminal_note = await self._emit_terminal_error(terminal_note)
 
         self.last_observations = list(ctx.observations)
         self.last_step_count = len(steps)
@@ -241,12 +247,14 @@ class CompetitionAgentLoop:
             )
             summary = await child.run(request.objective)
             return SubAgentPayload(
+                status=child.last_status,
                 result={
                     "merge_key": request.merge_key,
                     "summary": summary.model_dump(),
                 },
                 observations=child.last_observations,
                 warnings=summary.warnings,
+                error=child.last_error,
                 step_count=child.last_step_count,
             )
 
@@ -320,7 +328,12 @@ class CompetitionAgentLoop:
         tools: ToolRegistry,
         query: str,
     ) -> AgentAction:
-        if action.is_terminal or action.name == "plan" or tools.snapshot()["has_intent"]:
+        if (
+            action.is_terminal
+            or action.is_orchestration
+            or action.name == "plan"
+            or tools.snapshot()["has_intent"]
+        ):
             return action
         return AgentAction(
             name="plan",
@@ -328,6 +341,17 @@ class CompetitionAgentLoop:
             thought=f"Planner state is required before {action.name}; running plan first.",
             message=action.message,
         )
+
+    async def _emit_terminal_error(self, terminal_note: str) -> str:
+        self.last_status = "failed"
+        if self.scope.depth > 0:
+            terminal_note = sanitize_subagent_error(terminal_note)
+            self.last_error = terminal_note
+            await self.monitor.emit("subagent_error", terminal_note)
+        else:
+            self.last_error = terminal_note
+            await self.monitor.emit("task_error", terminal_note)
+        return terminal_note
 
     async def _emit_provider_observation(
         self,

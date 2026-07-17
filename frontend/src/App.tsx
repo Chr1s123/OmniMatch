@@ -47,6 +47,13 @@ type ProviderPayload = {
 
 const DEFAULT_QUERY = "我想买一套便宜又抗造的旅行三件套，预算300块，最好不要塑料的，喜欢小众一点。";
 
+function isScopedChildEvent(event: AgentEvent) {
+  return (
+    typeof event.payload.subagent_id === "string" ||
+    (typeof event.payload.fork_depth === "number" && event.payload.fork_depth > 0)
+  );
+}
+
 function App() {
   const [query, setQuery] = useState(DEFAULT_QUERY);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -113,7 +120,7 @@ function App() {
         }
         await refreshTaskState(nextThreadId);
       }
-      if (event.type === "task_error") {
+      if (event.type === "task_error" && !isScopedChildEvent(event)) {
         setStatus("failed");
         setError(event.message);
       }
