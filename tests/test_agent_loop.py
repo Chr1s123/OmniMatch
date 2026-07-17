@@ -1,9 +1,16 @@
+import asyncio
 import json
 
 import pytest
 
 from app.agent.actions import AgentAction
-from app.agent.forking import AgentScope, ForkRequest, thaw_context_snapshot
+from app.agent.forking import (
+    AgentScope,
+    ForkExecutor,
+    ForkRequest,
+    SubAgentPayload,
+    thaw_context_snapshot,
+)
 from app.agent.main_agent import CompetitionAgentLoop
 from app.api.monitor import EventCollector, ScopedEventCollector
 from app.config import OmniMatchSettings
@@ -190,6 +197,116 @@ def test_fork_request_rejects_unknown_tools():
             },
             submission_settings(),
         )
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_returns_stable_order_and_partial_failures():
+    monitor = EventCollector(thread_id="thread_forks")
+    executor = ForkExecutor(monitor=monitor, max_parallel=2)
+    requests = ForkRequest.parse_many(
+        {
+            "tasks": [
+                {
+                    "task_id": "b",
+                    "objective": "fail",
+                    "allowed_tools": ["plan"],
+                    "context_snapshot": {},
+                    "merge_key": "products",
+                },
+                {
+                    "task_id": "a",
+                    "objective": "succeed",
+                    "allowed_tools": ["plan"],
+                    "context_snapshot": {},
+                    "merge_key": "products",
+                },
+            ]
+        },
+        submission_settings(),
+    )
+
+    async def runner(request: ForkRequest) -> SubAgentPayload:
+        if request.objective == "fail":
+            raise RuntimeError("provider failed")
+        return SubAgentPayload(
+            result={"objective": request.objective},
+            observations=[{"tool": "plan"}],
+            warnings=[],
+            step_count=1,
+        )
+
+    results = await executor.execute(requests, runner)
+
+    assert [result.task_id for result in results] == ["a", "b"]
+    assert [result.status for result in results] == ["completed", "failed"]
+    assert results[1].error == "provider failed"
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_marks_timeout():
+    monitor = EventCollector(thread_id="thread_timeout")
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    request = ForkRequest(
+        task_id="slow",
+        objective="slow",
+        allowed_tools=["plan"],
+        context_snapshot={},
+        max_steps=1,
+        timeout_seconds=0.01,
+        merge_key="products",
+    )
+
+    async def runner(_: ForkRequest) -> SubAgentPayload:
+        await asyncio.sleep(1)
+        return SubAgentPayload(result={})
+
+    results = await executor.execute([request], runner)
+
+    assert results[0].status == "timed_out"
+    assert "timed out" in (results[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_parent_cancellation_cancels_and_awaits_all_runners():
+    monitor = EventCollector(thread_id="thread_cancel")
+    executor = ForkExecutor(monitor=monitor, max_parallel=2)
+    requests = [
+        ForkRequest(
+            task_id=task_id,
+            objective="wait",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=10,
+            merge_key="products",
+        )
+        for task_id in ("a", "b")
+    ]
+    runners_started = asyncio.Event()
+    runners_stopped = asyncio.Event()
+    active_runners: set[str] = set()
+
+    async def runner(request: ForkRequest) -> SubAgentPayload:
+        active_runners.add(request.task_id)
+        if len(active_runners) == len(requests):
+            runners_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active_runners.remove(request.task_id)
+            if not active_runners:
+                runners_stopped.set()
+        return SubAgentPayload(result={})
+
+    execution = asyncio.create_task(executor.execute(requests, runner))
+    await asyncio.wait_for(runners_started.wait(), timeout=1)
+
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    await asyncio.wait_for(runners_stopped.wait(), timeout=1)
+    assert active_runners == set()
 
 
 @pytest.mark.asyncio

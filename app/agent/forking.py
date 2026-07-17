@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping as MappingABC
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 import math
+import re
+from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.agent.actions import TOOL_ACTIONS
+from app.api.monitor import EventEmitter
 from app.config import OmniMatchSettings
 
 
@@ -151,3 +156,89 @@ class SubAgentPayload(BaseModel):
     observations: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     step_count: int = Field(default=0, ge=0)
+
+
+SubAgentRunner = Callable[[ForkRequest], Awaitable[SubAgentPayload]]
+
+
+def _safe_error(exc: Exception) -> str:
+    text = re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", str(exc))
+    return re.sub(r"(?i)(api[_-]?key|password)(\s*[:=]\s*)\S+", r"\1\2[REDACTED]", text)[:500]
+
+
+class ForkExecutor:
+    def __init__(self, monitor: EventEmitter, max_parallel: int) -> None:
+        self.monitor = monitor
+        self._semaphore = asyncio.Semaphore(max_parallel)
+
+    async def execute(
+        self,
+        requests: list[ForkRequest],
+        runner: SubAgentRunner,
+    ) -> list[SubAgentResult]:
+        tasks = [asyncio.create_task(self._run_one(request, runner)) for request in requests]
+        try:
+            results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return sorted(results, key=lambda result: result.task_id)
+
+    async def _run_one(
+        self,
+        request: ForkRequest,
+        runner: SubAgentRunner,
+    ) -> SubAgentResult:
+        started = perf_counter()
+        await self.monitor.emit(
+            "subagent_started",
+            f"Sub-agent {request.task_id} started.",
+            tool="fork",
+            payload={"subagent_id": request.task_id, "objective": request.objective},
+        )
+        try:
+            async with self._semaphore:
+                payload = await asyncio.wait_for(
+                    runner(request),
+                    timeout=request.timeout_seconds,
+                )
+            result = SubAgentResult(
+                task_id=request.task_id,
+                status="completed",
+                result=payload.result,
+                observations=payload.observations,
+                warnings=payload.warnings,
+                step_count=payload.step_count,
+                elapsed_ms=int((perf_counter() - started) * 1000),
+            )
+        except asyncio.TimeoutError:
+            result = SubAgentResult(
+                task_id=request.task_id,
+                status="timed_out",
+                error=f"sub-agent timed out after {request.timeout_seconds}s",
+                elapsed_ms=int((perf_counter() - started) * 1000),
+            )
+        except asyncio.CancelledError:
+            await self.monitor.emit(
+                "subagent_cancelled",
+                f"Sub-agent {request.task_id} cancelled.",
+                tool="fork",
+                payload={"subagent_id": request.task_id},
+            )
+            raise
+        except Exception as exc:
+            result = SubAgentResult(
+                task_id=request.task_id,
+                status="failed",
+                error=_safe_error(exc),
+                elapsed_ms=int((perf_counter() - started) * 1000),
+            )
+        await self.monitor.emit(
+            "subagent_finished",
+            f"Sub-agent {request.task_id} finished with {result.status}.",
+            tool="fork",
+            payload=result.model_dump(),
+        )
+        return result
