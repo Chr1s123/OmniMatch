@@ -15,6 +15,10 @@ The current app includes:
 - Structured candidate scoring, trace files, and a React observability console.
 - A small evaluation harness for repeatable regression cases.
 
+Homogeneous sub-agent work uses bounded forks of `CompetitionAgentLoop`. Each child has
+isolated tool state, an allowlist, step/time budgets, scoped events, and structured merge
+results; the removed `dispatch_tool.py` function-level mock is no longer the sub-agent path.
+
 ## Backend
 
 Install dependencies:
