@@ -9,7 +9,7 @@ import math
 import re
 from time import perf_counter
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -19,6 +19,34 @@ from app.config import OmniMatchSettings
 
 
 SubAgentStatus = Literal["completed", "failed", "cancelled", "timed_out"]
+_T = TypeVar("_T")
+
+
+class _SubAgentDeadlineExceeded(Exception):
+    pass
+
+
+async def _await_before_deadline(
+    operation: Callable[[], Awaitable[_T]],
+    deadline: float,
+) -> _T:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise _SubAgentDeadlineExceeded
+
+    task = asyncio.ensure_future(operation())
+    try:
+        done, _ = await asyncio.wait({task}, timeout=remaining)
+    except BaseException:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    if task in done:
+        return task.result()
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    raise _SubAgentDeadlineExceeded
 
 
 def _validate_context_snapshot(value: Any, path: str = "$") -> None:
@@ -36,9 +64,7 @@ def _validate_context_snapshot(value: Any, path: str = "$") -> None:
         raise ValueError(f"context_snapshot at {path} is not JSON-compatible: non-finite float")
     if value is None or isinstance(value, str | int | float | bool):
         return
-    raise ValueError(
-        f"context_snapshot at {path} is not JSON-compatible: {type(value).__name__}"
-    )
+    raise ValueError(f"context_snapshot at {path} is not JSON-compatible: {type(value).__name__}")
 
 
 def _freeze_context(value: Any) -> Any:
@@ -68,7 +94,9 @@ class AgentScope:
 
     def __post_init__(self) -> None:
         _validate_context_snapshot(self.context_snapshot)
-        object.__setattr__(self, "context_snapshot", _freeze_context(deepcopy(dict(self.context_snapshot))))
+        object.__setattr__(
+            self, "context_snapshot", _freeze_context(deepcopy(dict(self.context_snapshot)))
+        )
 
 
 class ForkRequest(BaseModel):
@@ -105,8 +133,7 @@ class ForkRequest(BaseModel):
             raise ValueError("fork arguments.tasks must be a non-empty list")
         if len(raw_tasks) > settings.max_parallel_subagents:
             raise ValueError(
-                "fork task count exceeds max_parallel_subagents="
-                f"{settings.max_parallel_subagents}"
+                f"fork task count exceeds max_parallel_subagents={settings.max_parallel_subagents}"
             )
 
         requests: list[ForkRequest] = []
@@ -162,9 +189,18 @@ SubAgentRunner = Callable[[ForkRequest], Awaitable[SubAgentPayload]]
 
 
 def _safe_error(exc: Exception) -> str:
-    text = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", str(exc))
+    text = re.sub(
+        r"(?i)\b(bearer|basic)(\s+)\S+",
+        r"\1\2[REDACTED]",
+        str(exc),
+    )
     return re.sub(
-        r"(?i)\b(api(?:[\s_-]?key)|password|authorization|token)(\s*[:=]\s*)\S+",
+        (
+            r"(?i)\b((?:[a-z0-9]+[_-])*(?:api(?:[\s_-]?key)|access(?:[\s_-]?token)|"
+            r"secret[_-]?access[_-]?key|client[_-]?secret|password|passwd|pwd|"
+            r"authorization|auth(?:[\s_-]?token)?|token|secret))"
+            r"(\s*[:=]\s*)(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\S+)"
+        ),
         r"\1\2[REDACTED]",
         text,
     )[:500]
@@ -183,9 +219,10 @@ class ForkExecutor:
         tasks = [asyncio.create_task(self._run_one(request, runner)) for request in requests]
         try:
             results = await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
+        except BaseException:
             for task in tasks:
-                task.cancel()
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         return sorted(results, key=lambda result: result.task_id)
@@ -195,56 +232,81 @@ class ForkExecutor:
         request: ForkRequest,
         runner: SubAgentRunner,
     ) -> SubAgentResult:
+        deadline = asyncio.get_running_loop().time() + request.timeout_seconds
         started = perf_counter()
-        await self.monitor.emit(
-            "subagent_started",
-            f"Sub-agent {request.task_id} started.",
-            tool="fork",
-            payload={"subagent_id": request.task_id, "objective": request.objective},
-        )
         try:
-            payload = await asyncio.wait_for(
-                self._run_with_semaphore(request, runner),
-                timeout=request.timeout_seconds,
+            await _await_before_deadline(
+                lambda: self.monitor.emit(
+                    "subagent_started",
+                    f"Sub-agent {request.task_id} started.",
+                    tool="fork",
+                    payload={
+                        "subagent_id": request.task_id,
+                        "objective": request.objective,
+                    },
+                ),
+                deadline,
             )
-            result = SubAgentResult(
-                task_id=request.task_id,
-                status="completed",
-                result=payload.result,
-                observations=payload.observations,
-                warnings=payload.warnings,
-                step_count=payload.step_count,
-                elapsed_ms=int((perf_counter() - started) * 1000),
+            try:
+                payload = await _await_before_deadline(
+                    lambda: self._run_with_semaphore(request, runner),
+                    deadline,
+                )
+                result = SubAgentResult(
+                    task_id=request.task_id,
+                    status="completed",
+                    result=payload.result,
+                    observations=payload.observations,
+                    warnings=payload.warnings,
+                    step_count=payload.step_count,
+                    elapsed_ms=int((perf_counter() - started) * 1000),
+                )
+            except _SubAgentDeadlineExceeded:
+                return self._timed_out_result(request, started)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = SubAgentResult(
+                    task_id=request.task_id,
+                    status="failed",
+                    error=_safe_error(exc),
+                    elapsed_ms=int((perf_counter() - started) * 1000),
+                )
+            await _await_before_deadline(
+                lambda: self.monitor.emit(
+                    "subagent_finished",
+                    f"Sub-agent {request.task_id} finished with {result.status}.",
+                    tool="fork",
+                    payload=result.model_dump(),
+                ),
+                deadline,
             )
-        except asyncio.TimeoutError:
-            result = SubAgentResult(
-                task_id=request.task_id,
-                status="timed_out",
-                error=f"sub-agent timed out after {request.timeout_seconds}s",
-                elapsed_ms=int((perf_counter() - started) * 1000),
-            )
+            return result
+        except _SubAgentDeadlineExceeded:
+            return self._timed_out_result(request, started)
         except asyncio.CancelledError:
-            await self.monitor.emit(
-                "subagent_cancelled",
-                f"Sub-agent {request.task_id} cancelled.",
-                tool="fork",
-                payload={"subagent_id": request.task_id},
-            )
+            try:
+                await _await_before_deadline(
+                    lambda: self.monitor.emit(
+                        "subagent_cancelled",
+                        f"Sub-agent {request.task_id} cancelled.",
+                        tool="fork",
+                        payload={"subagent_id": request.task_id},
+                    ),
+                    deadline,
+                )
+            except (_SubAgentDeadlineExceeded, Exception):
+                pass
             raise
-        except Exception as exc:
-            result = SubAgentResult(
-                task_id=request.task_id,
-                status="failed",
-                error=_safe_error(exc),
-                elapsed_ms=int((perf_counter() - started) * 1000),
-            )
-        await self.monitor.emit(
-            "subagent_finished",
-            f"Sub-agent {request.task_id} finished with {result.status}.",
-            tool="fork",
-            payload=result.model_dump(),
+
+    @staticmethod
+    def _timed_out_result(request: ForkRequest, started: float) -> SubAgentResult:
+        return SubAgentResult(
+            task_id=request.task_id,
+            status="timed_out",
+            error=f"sub-agent timed out after {request.timeout_seconds}s",
+            elapsed_ms=int((perf_counter() - started) * 1000),
         )
-        return result
 
     async def _run_with_semaphore(
         self,

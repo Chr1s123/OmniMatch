@@ -128,6 +128,66 @@ class ForkAwareLLMProvider(SequenceLLMProvider):
         )
 
 
+class SecretFailingChildLLMProvider(ForkAwareLLMProvider):
+    def __init__(self, error_text: str) -> None:
+        super().__init__()
+        self.error_text = error_text
+
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if not system_prompt.startswith("Extract shopping intent"):
+            state = json.loads(messages[1]["content"])
+            if state["query"] == "child-amazon":
+                raise RuntimeError(self.error_text)
+        return await super().plan_next_action(messages)
+
+
+class BudgetForkLLMProvider(SequenceLLMProvider):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.planner_states: dict[str, list[dict]] = {}
+
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if system_prompt.startswith("Extract shopping intent"):
+            return await super().plan_next_action(messages)
+
+        self.calls.append(messages)
+        self.action_calls.append(messages)
+        state = json.loads(messages[1]["content"])
+        query = state["query"]
+        completed = state["completed_actions"]
+        self.planner_states.setdefault(query, []).append(state)
+        if query == "parent" and not completed:
+            data = {"action": "plan", "arguments": {}, "thought": "Plan first."}
+        elif query == "parent" and completed == ["plan"]:
+            data = {
+                "action": "fork",
+                "arguments": {
+                    "tasks": [
+                        {
+                            "task_id": "budget_child",
+                            "objective": "budget-child",
+                            "allowed_tools": ["plan"],
+                            "context_snapshot": {},
+                            "max_steps": 2,
+                            "merge_key": "products",
+                        }
+                    ]
+                },
+            }
+        elif query == "parent":
+            data = {"action": "finish", "message": "scope complete"}
+        else:
+            data = {"action": "plan", "arguments": {}, "thought": "Keep planning."}
+        return ProviderResult(
+            provider="budget_fork_llm",
+            provider_mode="fake",
+            latency_ms=1,
+            data=data,
+        )
+
+
 class NestedForkLLMProvider(SequenceLLMProvider):
     def __init__(self) -> None:
         super().__init__([])
@@ -403,20 +463,20 @@ async def test_fork_executor_marks_timeout():
 
     assert [result.status for result in results] == ["completed", "timed_out"]
     assert "timed out" in (results[1].error or "")
-    assert {(event.type, event.payload["task_id"], event.payload["status"])
-            for event in monitor.events if event.type == "subagent_finished"} == {
-        ("subagent_finished", "slow", "timed_out"),
-        ("subagent_finished", "fast", "completed"),
-    }
+    assert {
+        (event.type, event.payload["task_id"], event.payload["status"])
+        for event in monitor.events
+        if event.type == "subagent_finished"
+    } == {("subagent_finished", "fast", "completed")}
 
 
 @pytest.mark.asyncio
 async def test_fork_executor_timeout_includes_semaphore_queue_wait():
-    queued_finished = asyncio.Event()
+    queued_started = asyncio.Event()
 
     async def on_event(event) -> None:
-        if event.type == "subagent_finished" and event.payload["task_id"] == "queued":
-            queued_finished.set()
+        if event.type == "subagent_started" and event.payload["subagent_id"] == "queued":
+            queued_started.set()
 
     monitor = EventCollector(thread_id="thread_queued_timeout", sink=on_event)
     executor = ForkExecutor(monitor=monitor, max_parallel=1)
@@ -453,17 +513,165 @@ async def test_fork_executor_timeout_includes_semaphore_queue_wait():
 
     execution = asyncio.create_task(executor.execute(requests, runner))
     await asyncio.wait_for(blocker_started.wait(), timeout=1)
+    await asyncio.wait_for(queued_started.wait(), timeout=1)
     try:
-        await asyncio.wait_for(queued_finished.wait(), timeout=0.2)
+        # The queued child has a 10ms whole-lifecycle budget. This tolerance is
+        # deliberately larger because this test is exercising real timeout behavior.
+        await asyncio.sleep(0.05)
     finally:
         release_blocker.set()
-        results = await execution
+        results = await asyncio.wait_for(execution, timeout=1)
 
     assert runner_started == {"blocker"}
     assert [(result.task_id, result.status) for result in results] == [
         ("blocker", "completed"),
         ("queued", "timed_out"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_timeout_includes_slow_start_emission():
+    start_emit_entered = asyncio.Event()
+    start_emit_stopped = asyncio.Event()
+    block_start_emit = asyncio.Event()
+    runner_started = asyncio.Event()
+    emit_attempts: list[str] = []
+
+    async def on_event(event) -> None:
+        emit_attempts.append(event.type)
+        if event.type != "subagent_started":
+            return
+        start_emit_entered.set()
+        try:
+            await block_start_emit.wait()
+        finally:
+            start_emit_stopped.set()
+
+    monitor = EventCollector(thread_id="thread_slow_start_emit", sink=on_event)
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    request = ForkRequest(
+        task_id="slow_start",
+        objective="never reaches runner",
+        allowed_tools=["plan"],
+        context_snapshot={},
+        max_steps=1,
+        timeout_seconds=0.02,
+        merge_key="products",
+    )
+
+    async def runner(_: ForkRequest) -> SubAgentPayload:
+        runner_started.set()
+        return SubAgentPayload(result={})
+
+    execution = asyncio.create_task(executor.execute([request], runner))
+    await asyncio.wait_for(start_emit_entered.wait(), timeout=1)
+    results = await asyncio.wait_for(execution, timeout=0.25)
+    await asyncio.wait_for(start_emit_stopped.wait(), timeout=1)
+
+    assert [(result.task_id, result.status) for result in results] == [("slow_start", "timed_out")]
+    assert runner_started.is_set() is False
+    assert emit_attempts == ["subagent_started"]
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_timeout_includes_slow_finish_emission():
+    finish_emit_entered = asyncio.Event()
+    finish_emit_stopped = asyncio.Event()
+    block_finish_emit = asyncio.Event()
+    runner_stopped = asyncio.Event()
+    emit_attempts: list[str] = []
+
+    async def on_event(event) -> None:
+        emit_attempts.append(event.type)
+        if event.type != "subagent_finished":
+            return
+        finish_emit_entered.set()
+        try:
+            await block_finish_emit.wait()
+        finally:
+            finish_emit_stopped.set()
+
+    monitor = EventCollector(thread_id="thread_slow_finish_emit", sink=on_event)
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    request = ForkRequest(
+        task_id="slow_finish",
+        objective="runner completes",
+        allowed_tools=["plan"],
+        context_snapshot={},
+        max_steps=1,
+        timeout_seconds=0.02,
+        merge_key="products",
+    )
+
+    async def runner(_: ForkRequest) -> SubAgentPayload:
+        runner_stopped.set()
+        return SubAgentPayload(result={})
+
+    execution = asyncio.create_task(executor.execute([request], runner))
+    await asyncio.wait_for(finish_emit_entered.wait(), timeout=1)
+    results = await asyncio.wait_for(execution, timeout=0.25)
+    await asyncio.wait_for(finish_emit_stopped.wait(), timeout=1)
+
+    assert [(result.task_id, result.status) for result in results] == [("slow_finish", "timed_out")]
+    assert runner_stopped.is_set()
+    assert emit_attempts == ["subagent_started", "subagent_finished"]
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_emitter_failure_cancels_and_awaits_siblings():
+    sibling_runner_started = asyncio.Event()
+    sibling_runner_stopped = asyncio.Event()
+    release_sibling = asyncio.Event()
+    terminal_events = {
+        "sibling": asyncio.Event(),
+        "queued": asyncio.Event(),
+    }
+
+    async def on_event(event) -> None:
+        if event.type == "subagent_started" and event.payload["subagent_id"] == "broken":
+            await sibling_runner_started.wait()
+            raise RuntimeError("event sink exploded")
+        if event.type not in {"subagent_finished", "subagent_cancelled"}:
+            return
+        task_id = event.payload.get("task_id") or event.payload.get("subagent_id")
+        if task_id in terminal_events:
+            terminal_events[task_id].set()
+
+    monitor = EventCollector(thread_id="thread_emitter_failure", sink=on_event)
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    requests = [
+        ForkRequest(
+            task_id=task_id,
+            objective="wait",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=1,
+            merge_key="products",
+        )
+        for task_id in ("broken", "sibling", "queued")
+    ]
+    runner_started: set[str] = set()
+
+    async def runner(request: ForkRequest) -> SubAgentPayload:
+        runner_started.add(request.task_id)
+        if request.task_id == "sibling":
+            sibling_runner_started.set()
+            try:
+                await release_sibling.wait()
+            finally:
+                sibling_runner_stopped.set()
+        return SubAgentPayload(result={"task_id": request.task_id})
+
+    try:
+        with pytest.raises(RuntimeError, match="event sink exploded"):
+            await asyncio.wait_for(executor.execute(requests, runner), timeout=1)
+        assert sibling_runner_stopped.is_set()
+        assert runner_started == {"sibling"}
+    finally:
+        release_sibling.set()
+        await asyncio.wait_for(terminal_events["sibling"].wait(), timeout=1)
+        await asyncio.wait_for(terminal_events["queued"].wait(), timeout=1)
 
 
 @pytest.mark.asyncio
@@ -506,8 +714,11 @@ async def test_fork_executor_parent_cancellation_cancels_queued_and_running_chil
         await execution
     await asyncio.wait_for(running_stopped.wait(), timeout=1)
     assert runner_started == {"running"}
-    assert {event.payload["subagent_id"] for event in monitor.events
-            if event.type == "subagent_cancelled"} == {"running", "queued_a", "queued_b"}
+    assert {
+        event.payload["subagent_id"]
+        for event in monitor.events
+        if event.type == "subagent_cancelled"
+    } == {"running", "queued_a", "queued_b"}
 
 
 @pytest.mark.asyncio
@@ -565,6 +776,9 @@ async def test_fork_executor_never_exceeds_max_parallel_runners():
         "api key: SECRET+/=TOKEN",
         "api_key = SECRET+/=TOKEN",
         "api-key=SECRET+/=TOKEN",
+        "OPENAI_API_KEY=SECRET+/=TOKEN",
+        "serpapi_api_key : SECRET+/=TOKEN",
+        "Aws_Access_Token = SECRET+/=TOKEN",
         "password : SECRET+/=TOKEN",
         "AUTHORIZATION=SECRET+/=TOKEN",
         "token = SECRET+/=TOKEN",
@@ -762,6 +976,139 @@ async def test_main_loop_forks_same_loop_and_isolates_child_state(tmp_path):
         ]
         assert [row["action"] for row in child_rows] == ["plan", "finish"]
     assert [row["action"] for row in root_rows] == ["plan", "fork", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_fork_integration_redacts_child_error_from_result_event_and_parent_trace(tmp_path):
+    secrets = {
+        "sk-openai-secret",
+        "serp-secret",
+        "aws-secret",
+        "password-secret",
+        "authorization-secret",
+        "token-secret",
+    }
+    error_text = " ".join(
+        [
+            "OPENAI_API_KEY=sk-openai-secret",
+            "SERPAPI_API_KEY:serp-secret",
+            "AWS_ACCESS_TOKEN=aws-secret",
+            "password=password-secret",
+            "authorization:Bearer authorization-secret",
+            "token=token-secret",
+        ]
+    )
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    providers = ProviderRegistry(
+        llm=SecretFailingChildLLMProvider(error_text),
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_secret_trace")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_secret_trace",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    fork_observation = next(
+        observation for observation in loop.last_observations if observation["tool"] == "fork"
+    )
+    failed_result = next(
+        result for result in fork_observation["subagents"] if result["task_id"] == "amazon"
+    )
+    finished_payload = next(
+        event.payload
+        for event in monitor.events
+        if event.type == "subagent_finished" and event.payload["task_id"] == "amazon"
+    )
+    parent_trace = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+
+    assert failed_result["status"] == "failed"
+    assert "[REDACTED]" in failed_result["error"]
+    for secret in secrets:
+        assert secret not in failed_result["error"]
+        assert secret not in json.dumps(finished_payload)
+        assert secret not in parent_trace
+
+
+@pytest.mark.asyncio
+async def test_child_planner_prompt_discloses_only_scoped_tools(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    llm = ForkAwareLLMProvider()
+    providers = ProviderRegistry(
+        llm=llm,
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    loop = CompetitionAgentLoop(
+        thread_id="thread_prompt_scope",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=EventCollector(thread_id="thread_prompt_scope"),
+    )
+
+    await loop.run("parent")
+
+    root_prompt = llm.system_prompts["parent"][0]
+    child_prompt = llm.system_prompts["child-amazon"][0]
+    assert (
+        "Allowed tool actions: plan, category_insight, item_search, shipping, rank, pick."
+        in root_prompt
+    )
+    assert "Allowed tool actions: plan." in child_prompt
+    for disallowed_tool in ("category_insight", "item_search", "shipping", "rank", "pick"):
+        assert disallowed_tool not in child_prompt
+
+
+@pytest.mark.asyncio
+async def test_fork_integration_enforces_lower_child_step_budget_and_reports_exact_count(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    llm = BudgetForkLLMProvider()
+    providers = ProviderRegistry(
+        llm=llm,
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    loop = CompetitionAgentLoop(
+        thread_id="thread_child_budget",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=EventCollector(thread_id="thread_child_budget"),
+    )
+
+    await loop.run("parent")
+
+    fork_observation = next(
+        observation for observation in loop.last_observations if observation["tool"] == "fork"
+    )
+    child_result = fork_observation["subagents"][0]
+    child_trace = [
+        json.loads(line)
+        for line in (tmp_path / "subagents" / "budget_child" / "trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert settings.subagent_max_steps == 4
+    assert len(llm.planner_states["budget-child"]) == 2
+    assert [row["action"] for row in child_trace] == ["plan", "plan"]
+    assert child_result["status"] == "completed"
+    assert child_result["step_count"] == 2
+    assert child_result["result"]["summary"]["status_note"] == (
+        "Reached max_steps=2 before a finish action."
+    )
 
 
 @pytest.mark.asyncio

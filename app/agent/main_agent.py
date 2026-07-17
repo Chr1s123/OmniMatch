@@ -23,6 +23,9 @@ from app.tools.context import ToolContext
 from app.tools.shopping_summary import build_summary
 
 
+_ROOT_TOOL_ACTIONS = ("plan", "category_insight", "item_search", "shipping", "rank", "pick")
+
+
 class CompetitionAgentLoop:
     def __init__(
         self,
@@ -132,9 +135,7 @@ class CompetitionAgentLoop:
                         observations=step_observations,
                     )
                 )
-                trace.append(
-                    self._trace_row(action, step_observations, len(ctx.observations))
-                )
+                trace.append(self._trace_row(action, step_observations, len(ctx.observations)))
                 continue
 
             await self.monitor.emit("tool_start", f"{action.name} started", tool=action.name)
@@ -209,9 +210,7 @@ class CompetitionAgentLoop:
             )
 
         root_monitor = (
-            self.monitor.parent
-            if isinstance(self.monitor, ScopedEventCollector)
-            else self.monitor
+            self.monitor.parent if isinstance(self.monitor, ScopedEventCollector) else self.monitor
         )
         executor = ForkExecutor(
             monitor=ScopedEventCollector(root_monitor, {"fork_depth": child_depth}),
@@ -261,6 +260,11 @@ class CompetitionAgentLoop:
         ctx: ToolContext,
         steps: list[AgentStep],
     ) -> tuple[AgentAction, dict[str, Any]]:
+        allowed_tool_actions = (
+            _ROOT_TOOL_ACTIONS
+            if self.scope.allowed_tools is None
+            else tuple(sorted(self.scope.allowed_tools))
+        )
         fork_instruction = (
             "Allowed orchestration action: fork. "
             if self.scope.depth < self.settings.max_fork_depth
@@ -272,7 +276,7 @@ class CompetitionAgentLoop:
                     "role": "system",
                     "content": (
                         "Choose the next shopping-agent action as JSON. Allowed tool actions: "
-                        "plan, category_insight, item_search, shipping, rank, pick. "
+                        f"{', '.join(allowed_tool_actions)}. "
                         f"{fork_instruction}"
                         "Allowed terminal actions: finish, clarify, fail. "
                         "Return action, arguments, thought, and optional message."
@@ -288,9 +292,7 @@ class CompetitionAgentLoop:
                             "recent_observations": ctx.observations[-5:],
                             "completed_actions": [step.action.name for step in steps],
                             "fork_depth": self.scope.depth,
-                            "context_snapshot": thaw_context_snapshot(
-                                self.scope.context_snapshot
-                            ),
+                            "context_snapshot": thaw_context_snapshot(self.scope.context_snapshot),
                         },
                         ensure_ascii=False,
                     ),
