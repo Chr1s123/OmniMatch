@@ -5,7 +5,7 @@ import pytest
 from app.agent.actions import AgentAction
 from app.agent.forking import AgentScope, ForkRequest, thaw_context_snapshot
 from app.agent.main_agent import CompetitionAgentLoop
-from app.api.monitor import EventCollector
+from app.api.monitor import EventCollector, ScopedEventCollector
 from app.config import OmniMatchSettings
 from app.providers.base import ProviderResult
 from app.providers.registry import ProviderRegistry
@@ -190,6 +190,23 @@ def test_fork_request_rejects_unknown_tools():
             },
             submission_settings(),
         )
+
+
+@pytest.mark.asyncio
+async def test_scoped_event_collector_enriches_child_events():
+    parent = EventCollector(thread_id="thread_scope")
+    child = ScopedEventCollector(
+        parent,
+        {"subagent_id": "amazon", "fork_depth": 1},
+    )
+
+    await child.emit("tool_start", "search", tool="item_search", payload={"k": 100})
+
+    assert parent.events[-1].payload == {
+        "k": 100,
+        "subagent_id": "amazon",
+        "fork_depth": 1,
+    }
 
 
 def test_agent_scope_context_snapshot_is_read_only():

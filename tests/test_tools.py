@@ -15,6 +15,19 @@ from app.tools.shipping_calc import calculate_shipping
 from app.tools.shopping_summary import build_summary
 
 
+def submission_settings() -> OmniMatchSettings:
+    return OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
+
+
 class RecordingLLMProvider:
     def __init__(self) -> None:
         self.messages: list[dict] | None = None
@@ -142,6 +155,18 @@ async def test_tool_registry_snapshot_reports_progress():
     assert after_rank["candidate_count"] == 4
     assert after_rank["scored_count"] == 4
     assert after_rank["top_score"] is not None
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_rejects_tools_outside_child_allowlist():
+    settings = submission_settings()
+    ctx = ToolContext(settings=settings, providers=ProviderRegistry.from_settings(settings))
+    registry = ToolRegistry(ctx, allowed_tools=frozenset({"plan"}))
+
+    await registry.run("plan", {"query": "旅行三件套"})
+
+    with pytest.raises(PermissionError, match="item_search"):
+        await registry.run("item_search", {})
 
 
 @pytest.mark.asyncio

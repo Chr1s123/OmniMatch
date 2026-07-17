@@ -13,14 +13,21 @@ from app.tools.shipping_calc import calculate_shipping
 
 
 class ToolRegistry:
-    def __init__(self, ctx: ToolContext) -> None:
+    def __init__(
+        self,
+        ctx: ToolContext,
+        allowed_tools: frozenset[str] | None = None,
+    ) -> None:
         self.ctx = ctx
+        self.allowed_tools = allowed_tools
         self.intent: ShoppingIntent | None = None
         self.insight: dict[str, Any] | None = None
         self.candidates: list[ProductCandidate] = []
         self.scored: list[ScoredProduct] = []
 
     async def run(self, action: str, arguments: dict[str, Any]) -> object:
+        if self.allowed_tools is not None and action not in self.allowed_tools:
+            raise PermissionError(f"tool action is not allowed in this agent scope: {action}")
         if action == "plan":
             self.intent = await plan_query(arguments["query"], self.ctx)
             return self.intent
