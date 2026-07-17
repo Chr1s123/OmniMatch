@@ -245,31 +245,104 @@ async def test_fork_executor_returns_stable_order_and_partial_failures():
 @pytest.mark.asyncio
 async def test_fork_executor_marks_timeout():
     monitor = EventCollector(thread_id="thread_timeout")
-    executor = ForkExecutor(monitor=monitor, max_parallel=1)
-    request = ForkRequest(
-        task_id="slow",
-        objective="slow",
-        allowed_tools=["plan"],
-        context_snapshot={},
-        max_steps=1,
-        timeout_seconds=0.01,
-        merge_key="products",
-    )
+    executor = ForkExecutor(monitor=monitor, max_parallel=2)
+    requests = [
+        ForkRequest(
+            task_id="slow",
+            objective="slow",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=0.01,
+            merge_key="products",
+        ),
+        ForkRequest(
+            task_id="fast",
+            objective="fast",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=1,
+            merge_key="products",
+        ),
+    ]
 
-    async def runner(_: ForkRequest) -> SubAgentPayload:
-        await asyncio.sleep(1)
-        return SubAgentPayload(result={})
+    async def runner(request: ForkRequest) -> SubAgentPayload:
+        if request.task_id == "slow":
+            await asyncio.sleep(1)
+        return SubAgentPayload(result={"task_id": request.task_id})
 
-    results = await executor.execute([request], runner)
+    results = await executor.execute(requests, runner)
 
-    assert results[0].status == "timed_out"
-    assert "timed out" in (results[0].error or "")
+    assert [result.status for result in results] == ["completed", "timed_out"]
+    assert "timed out" in (results[1].error or "")
+    assert {(event.type, event.payload["task_id"], event.payload["status"])
+            for event in monitor.events if event.type == "subagent_finished"} == {
+        ("subagent_finished", "slow", "timed_out"),
+        ("subagent_finished", "fast", "completed"),
+    }
 
 
 @pytest.mark.asyncio
-async def test_fork_executor_parent_cancellation_cancels_and_awaits_all_runners():
+async def test_fork_executor_timeout_includes_semaphore_queue_wait():
+    queued_finished = asyncio.Event()
+
+    async def on_event(event) -> None:
+        if event.type == "subagent_finished" and event.payload["task_id"] == "queued":
+            queued_finished.set()
+
+    monitor = EventCollector(thread_id="thread_queued_timeout", sink=on_event)
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    requests = [
+        ForkRequest(
+            task_id="blocker",
+            objective="blocker",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=1,
+            merge_key="products",
+        ),
+        ForkRequest(
+            task_id="queued",
+            objective="queued",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=0.01,
+            merge_key="products",
+        ),
+    ]
+    blocker_started = asyncio.Event()
+    release_blocker = asyncio.Event()
+    runner_started: set[str] = set()
+
+    async def runner(request: ForkRequest) -> SubAgentPayload:
+        runner_started.add(request.task_id)
+        if request.task_id == "blocker":
+            blocker_started.set()
+            await release_blocker.wait()
+        return SubAgentPayload(result={"task_id": request.task_id})
+
+    execution = asyncio.create_task(executor.execute(requests, runner))
+    await asyncio.wait_for(blocker_started.wait(), timeout=1)
+    try:
+        await asyncio.wait_for(queued_finished.wait(), timeout=0.2)
+    finally:
+        release_blocker.set()
+        results = await execution
+
+    assert runner_started == {"blocker"}
+    assert [(result.task_id, result.status) for result in results] == [
+        ("blocker", "completed"),
+        ("queued", "timed_out"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_parent_cancellation_cancels_queued_and_running_children():
     monitor = EventCollector(thread_id="thread_cancel")
-    executor = ForkExecutor(monitor=monitor, max_parallel=2)
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
     requests = [
         ForkRequest(
             task_id=task_id,
@@ -280,33 +353,121 @@ async def test_fork_executor_parent_cancellation_cancels_and_awaits_all_runners(
             timeout_seconds=10,
             merge_key="products",
         )
-        for task_id in ("a", "b")
+        for task_id in ("running", "queued_a", "queued_b")
     ]
-    runners_started = asyncio.Event()
-    runners_stopped = asyncio.Event()
-    active_runners: set[str] = set()
+    running_started = asyncio.Event()
+    running_stopped = asyncio.Event()
+    runner_started: set[str] = set()
 
     async def runner(request: ForkRequest) -> SubAgentPayload:
-        active_runners.add(request.task_id)
-        if len(active_runners) == len(requests):
-            runners_started.set()
+        runner_started.add(request.task_id)
+        if request.task_id == "running":
+            running_started.set()
         try:
             await asyncio.Event().wait()
         finally:
-            active_runners.remove(request.task_id)
-            if not active_runners:
-                runners_stopped.set()
+            if request.task_id == "running":
+                running_stopped.set()
         return SubAgentPayload(result={})
 
     execution = asyncio.create_task(executor.execute(requests, runner))
-    await asyncio.wait_for(runners_started.wait(), timeout=1)
+    await asyncio.wait_for(running_started.wait(), timeout=1)
 
     execution.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await execution
-    await asyncio.wait_for(runners_stopped.wait(), timeout=1)
-    assert active_runners == set()
+    await asyncio.wait_for(running_stopped.wait(), timeout=1)
+    assert runner_started == {"running"}
+    assert {event.payload["subagent_id"] for event in monitor.events
+            if event.type == "subagent_cancelled"} == {"running", "queued_a", "queued_b"}
+
+
+@pytest.mark.asyncio
+async def test_fork_executor_never_exceeds_max_parallel_runners():
+    executor = ForkExecutor(monitor=EventCollector(thread_id="thread_parallel"), max_parallel=2)
+    requests = [
+        ForkRequest(
+            task_id=task_id,
+            objective="wait",
+            allowed_tools=["plan"],
+            context_snapshot={},
+            max_steps=1,
+            timeout_seconds=1,
+            merge_key="products",
+        )
+        for task_id in ("a", "b", "c")
+    ]
+    two_runners_active = asyncio.Event()
+    release_runners = asyncio.Event()
+    active_runners = 0
+    peak_runners = 0
+    runner_started: set[str] = set()
+
+    async def runner(request: ForkRequest) -> SubAgentPayload:
+        nonlocal active_runners, peak_runners
+        active_runners += 1
+        peak_runners = max(peak_runners, active_runners)
+        runner_started.add(request.task_id)
+        if active_runners == 2:
+            two_runners_active.set()
+        try:
+            await release_runners.wait()
+        finally:
+            active_runners -= 1
+        return SubAgentPayload(result={"task_id": request.task_id})
+
+    execution = asyncio.create_task(executor.execute(requests, runner))
+    await asyncio.wait_for(two_runners_active.wait(), timeout=1)
+
+    assert active_runners == 2
+    assert peak_runners == 2
+    assert len(runner_started) == 2
+
+    release_runners.set()
+    await execution
+
+    assert peak_runners == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_text",
+    [
+        "bEaReR SECRET+/=TOKEN",
+        "api key: SECRET+/=TOKEN",
+        "api_key = SECRET+/=TOKEN",
+        "api-key=SECRET+/=TOKEN",
+        "password : SECRET+/=TOKEN",
+        "AUTHORIZATION=SECRET+/=TOKEN",
+        "token = SECRET+/=TOKEN",
+    ],
+)
+async def test_fork_executor_redacts_secret_forms_from_results_and_events(error_text):
+    secret = "SECRET+/=TOKEN"
+    monitor = EventCollector(thread_id="thread_secret")
+    executor = ForkExecutor(monitor=monitor, max_parallel=1)
+    request = ForkRequest(
+        task_id="secret",
+        objective="fail safely",
+        allowed_tools=["plan"],
+        context_snapshot={},
+        max_steps=1,
+        timeout_seconds=1,
+        merge_key="products",
+    )
+
+    async def runner(_: ForkRequest) -> SubAgentPayload:
+        raise RuntimeError(f"provider failed: {error_text}")
+
+    result = (await executor.execute([request], runner))[0]
+    finished_payload = next(
+        event.payload for event in monitor.events if event.type == "subagent_finished"
+    )
+
+    assert "[REDACTED]" in (result.error or "")
+    assert secret not in (result.error or "")
+    assert secret not in json.dumps(finished_payload)
 
 
 @pytest.mark.asyncio

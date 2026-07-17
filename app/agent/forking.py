@@ -162,8 +162,12 @@ SubAgentRunner = Callable[[ForkRequest], Awaitable[SubAgentPayload]]
 
 
 def _safe_error(exc: Exception) -> str:
-    text = re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", str(exc))
-    return re.sub(r"(?i)(api[_-]?key|password)(\s*[:=]\s*)\S+", r"\1\2[REDACTED]", text)[:500]
+    text = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", str(exc))
+    return re.sub(
+        r"(?i)\b(api(?:[\s_-]?key)|password|authorization|token)(\s*[:=]\s*)\S+",
+        r"\1\2[REDACTED]",
+        text,
+    )[:500]
 
 
 class ForkExecutor:
@@ -199,11 +203,10 @@ class ForkExecutor:
             payload={"subagent_id": request.task_id, "objective": request.objective},
         )
         try:
-            async with self._semaphore:
-                payload = await asyncio.wait_for(
-                    runner(request),
-                    timeout=request.timeout_seconds,
-                )
+            payload = await asyncio.wait_for(
+                self._run_with_semaphore(request, runner),
+                timeout=request.timeout_seconds,
+            )
             result = SubAgentResult(
                 task_id=request.task_id,
                 status="completed",
@@ -242,3 +245,11 @@ class ForkExecutor:
             payload=result.model_dump(),
         )
         return result
+
+    async def _run_with_semaphore(
+        self,
+        request: ForkRequest,
+        runner: SubAgentRunner,
+    ) -> SubAgentPayload:
+        async with self._semaphore:
+            return await runner(request)
