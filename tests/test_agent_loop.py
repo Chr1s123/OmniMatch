@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.agent.actions import AgentAction
+from app.agent.forking import AgentScope, ForkRequest, thaw_context_snapshot
 from app.agent.main_agent import CompetitionAgentLoop
 from app.api.monitor import EventCollector
 from app.config import OmniMatchSettings
@@ -81,6 +82,141 @@ def test_agent_action_turns_unknown_action_into_fail():
     assert action.name == "fail"
     assert action.is_terminal is True
     assert "unknown action" in action.message
+
+
+def test_agent_action_normalizes_fork_action():
+    action = AgentAction.from_provider_data(
+        {
+            "action": "fork",
+            "arguments": {
+                "tasks": [
+                    {
+                        "task_id": "amazon",
+                        "objective": "Search Amazon",
+                        "allowed_tools": ["plan", "item_search"],
+                        "context_snapshot": {"query": "carry-on"},
+                        "merge_key": "products",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert action.name == "fork"
+    assert action.is_terminal is False
+    assert action.is_orchestration is True
+
+
+def test_fork_request_uses_settings_budgets():
+    settings = submission_settings()
+    requests = ForkRequest.parse_many(
+        {
+            "tasks": [
+                {
+                    "task_id": "amazon",
+                    "objective": "Search Amazon",
+                    "allowed_tools": ["plan", "item_search"],
+                    "context_snapshot": {},
+                    "merge_key": "products",
+                }
+            ]
+        },
+        settings,
+    )
+
+    assert requests[0].max_steps == 4
+    assert requests[0].timeout_seconds == 30.0
+    assert AgentScope().depth == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "limit"),
+    [("max_steps", 5, "subagent_max_steps"), ("timeout_seconds", 30.1, "subagent_timeout_seconds")],
+)
+def test_fork_request_rejects_budget_above_settings(field, value, limit):
+    with pytest.raises(ValueError, match=limit):
+        ForkRequest.parse_many(
+            {
+                "tasks": [
+                    {
+                        "task_id": "amazon",
+                        "objective": "Search Amazon",
+                        "allowed_tools": ["plan"],
+                        "context_snapshot": {},
+                        field: value,
+                        "merge_key": "products",
+                    }
+                ]
+            },
+            submission_settings(),
+        )
+
+
+def test_fork_request_allows_lower_budgets():
+    request = ForkRequest.parse_many(
+        {
+            "tasks": [
+                {
+                    "task_id": "amazon",
+                    "objective": "Search Amazon",
+                    "allowed_tools": ["plan"],
+                    "context_snapshot": {},
+                    "max_steps": 2,
+                    "timeout_seconds": 10.0,
+                    "merge_key": "products",
+                }
+            ]
+        },
+        submission_settings(),
+    )[0]
+
+    assert request.max_steps == 2
+    assert request.timeout_seconds == 10.0
+
+
+def test_fork_request_rejects_unknown_tools():
+    with pytest.raises(ValueError, match="unknown allowed tool"):
+        ForkRequest.parse_many(
+            {
+                "tasks": [
+                    {
+                        "task_id": "unsafe",
+                        "objective": "Do unsafe work",
+                        "allowed_tools": ["delete_everything"],
+                        "context_snapshot": {},
+                        "merge_key": "products",
+                    }
+                ]
+            },
+            submission_settings(),
+        )
+
+
+def test_agent_scope_context_snapshot_is_read_only():
+    scope = AgentScope(context_snapshot={"platform": "Amazon"})
+
+    with pytest.raises(TypeError):
+        scope.context_snapshot["platform"] = "eBay"
+
+
+def test_agent_scope_context_snapshot_is_recursively_read_only():
+    scope = AgentScope(
+        context_snapshot={"platforms": ["Amazon"], "filters": {"price": {"max": 300}}}
+    )
+
+    with pytest.raises(TypeError):
+        scope.context_snapshot["filters"]["price"]["max"] = 500
+    with pytest.raises(AttributeError):
+        scope.context_snapshot["platforms"].append("eBay")
+
+
+def test_thaw_context_snapshot_returns_mutable_serialization_copy():
+    scope = AgentScope(context_snapshot={"platforms": ["Amazon"], "tags": {"travel"}})
+
+    snapshot = thaw_context_snapshot(scope.context_snapshot)
+    snapshot["platforms"].append("eBay")
+
+    assert snapshot == {"platforms": ["Amazon", "eBay"], "tags": ["travel"]}
 
 
 @pytest.mark.asyncio

@@ -5,10 +5,12 @@ from typing import Any, Literal
 
 
 ToolActionName = Literal["plan", "category_insight", "item_search", "shipping", "rank", "pick"]
+OrchestrationActionName = Literal["fork"]
 TerminalActionName = Literal["finish", "clarify", "fail"]
-ActionName = ToolActionName | TerminalActionName
+ActionName = ToolActionName | OrchestrationActionName | TerminalActionName
 
 TOOL_ACTIONS: set[str] = {"plan", "category_insight", "item_search", "shipping", "rank", "pick"}
+ORCHESTRATION_ACTIONS: set[str] = {"fork"}
 TERMINAL_ACTIONS: set[str] = {"finish", "clarify", "fail"}
 
 
@@ -27,7 +29,7 @@ class AgentAction:
         thought = str(data.get("thought") or "")
         message = str(data.get("message") or "")
 
-        if raw_name in TOOL_ACTIONS or raw_name in TERMINAL_ACTIONS:
+        if raw_name in TOOL_ACTIONS | ORCHESTRATION_ACTIONS | TERMINAL_ACTIONS:
             return cls(
                 name=raw_name,  # type: ignore[arg-type]
                 arguments=arguments,
@@ -45,6 +47,10 @@ class AgentAction:
     @property
     def is_terminal(self) -> bool:
         return self.name in TERMINAL_ACTIONS
+
+    @property
+    def is_orchestration(self) -> bool:
+        return self.name in ORCHESTRATION_ACTIONS
 
 
 @dataclass(frozen=True)
