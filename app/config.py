@@ -15,6 +15,26 @@ class ConfigError(RuntimeError):
     pass
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number") from exc
+
+
 @dataclass(frozen=True)
 class OmniMatchSettings:
     profile: Profile
@@ -27,6 +47,10 @@ class OmniMatchSettings:
     eval_provider: str
     product_api_url: str | None = None
     web_search_api_url: str | None = None
+    max_fork_depth: int = 1
+    max_parallel_subagents: int = 4
+    subagent_max_steps: int = 4
+    subagent_timeout_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> "OmniMatchSettings":
@@ -35,6 +59,16 @@ class OmniMatchSettings:
         profile = process_env.get("OMNIMATCH_PROFILE") or os.getenv("OMNIMATCH_PROFILE", "dev")
         if profile not in {"dev", "submission", "test"}:
             raise ConfigError("OMNIMATCH_PROFILE must be dev, submission, or test")
+        fork_limits = {
+            "max_fork_depth": _env_int("OMNIMATCH_MAX_FORK_DEPTH", 1),
+            "max_parallel_subagents": _env_int(
+                "OMNIMATCH_MAX_PARALLEL_SUBAGENTS", 4
+            ),
+            "subagent_max_steps": _env_int("OMNIMATCH_SUBAGENT_MAX_STEPS", 4),
+            "subagent_timeout_seconds": _env_float(
+                "OMNIMATCH_SUBAGENT_TIMEOUT_SECONDS", 30.0
+            ),
+        }
 
         if profile == "submission":
             settings = cls(
@@ -48,6 +82,7 @@ class OmniMatchSettings:
                 eval_provider=process_env.get("OMNIMATCH_EVAL_PROVIDER", "placeholder"),
                 product_api_url=os.getenv("OMNIMATCH_PRODUCT_API_URL"),
                 web_search_api_url=os.getenv("OMNIMATCH_WEB_SEARCH_API_URL"),
+                **fork_limits,
             )
         elif profile == "test":
             settings = cls(
@@ -59,6 +94,7 @@ class OmniMatchSettings:
                 shipping_provider=os.getenv("OMNIMATCH_SHIPPING_PROVIDER", "placeholder"),
                 memory_provider=os.getenv("OMNIMATCH_MEMORY_PROVIDER", "memory"),
                 eval_provider=os.getenv("OMNIMATCH_EVAL_PROVIDER", "heuristic"),
+                **fork_limits,
             )
         else:
             settings = cls(
@@ -72,6 +108,7 @@ class OmniMatchSettings:
                 eval_provider=os.getenv("OMNIMATCH_EVAL_PROVIDER", "heuristic"),
                 product_api_url=os.getenv("OMNIMATCH_PRODUCT_API_URL"),
                 web_search_api_url=os.getenv("OMNIMATCH_WEB_SEARCH_API_URL"),
+                **fork_limits,
             )
         settings.validate()
         return settings
@@ -93,6 +130,14 @@ class OmniMatchSettings:
         }
 
     def validate(self) -> None:
+        if self.max_fork_depth < 0:
+            raise ConfigError("max_fork_depth must be >= 0")
+        if self.max_parallel_subagents < 1:
+            raise ConfigError("max_parallel_subagents must be >= 1")
+        if self.subagent_max_steps < 1:
+            raise ConfigError("subagent_max_steps must be >= 1")
+        if self.subagent_timeout_seconds <= 0:
+            raise ConfigError("subagent_timeout_seconds must be > 0")
         if self.profile == "test":
             return
         if self.profile == "dev":

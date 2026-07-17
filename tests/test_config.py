@@ -1,8 +1,53 @@
 import os
+from dataclasses import replace
 
 import pytest
 
 from app.config import ConfigError, OmniMatchSettings
+
+
+def submission_settings() -> OmniMatchSettings:
+    return OmniMatchSettings(
+        profile="submission",
+        llm_provider="placeholder",
+        llm_model="placeholder-llm",
+        product_provider="placeholder",
+        web_search_provider="placeholder",
+        shipping_provider="placeholder",
+        memory_provider="placeholder",
+        eval_provider="placeholder",
+    )
+
+
+def test_fork_settings_have_bounded_defaults():
+    settings = submission_settings()
+
+    assert settings.max_fork_depth == 1
+    assert settings.max_parallel_subagents == 4
+    assert settings.subagent_max_steps == 4
+    assert settings.subagent_timeout_seconds == 30.0
+
+
+def test_fork_settings_read_environment(monkeypatch):
+    monkeypatch.setenv("OMNIMATCH_PROFILE", "submission")
+    monkeypatch.setenv("OMNIMATCH_MAX_FORK_DEPTH", "2")
+    monkeypatch.setenv("OMNIMATCH_MAX_PARALLEL_SUBAGENTS", "3")
+    monkeypatch.setenv("OMNIMATCH_SUBAGENT_MAX_STEPS", "5")
+    monkeypatch.setenv("OMNIMATCH_SUBAGENT_TIMEOUT_SECONDS", "12.5")
+
+    settings = OmniMatchSettings.from_env()
+
+    assert settings.max_fork_depth == 2
+    assert settings.max_parallel_subagents == 3
+    assert settings.subagent_max_steps == 5
+    assert settings.subagent_timeout_seconds == 12.5
+
+
+def test_fork_settings_reject_non_positive_limits():
+    settings = replace(submission_settings(), max_parallel_subagents=0)
+
+    with pytest.raises(ConfigError, match="max_parallel_subagents"):
+        settings.validate()
 
 
 def clear_omnimatch_env(monkeypatch):
