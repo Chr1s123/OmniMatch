@@ -82,6 +82,7 @@ class CompetitionAgentLoop:
                 steps=steps,
             )
             action = self._ensure_executable_action(action, tools, query)
+            action = self._sanitize_child_terminal_action(action)
             await self._emit_provider_observation(action.name, planner_observation)
             await self.monitor.emit(
                 "thought",
@@ -340,6 +341,16 @@ class CompetitionAgentLoop:
             arguments={"query": query},
             thought=f"Planner state is required before {action.name}; running plan first.",
             message=action.message,
+        )
+
+    def _sanitize_child_terminal_action(self, action: AgentAction) -> AgentAction:
+        if self.scope.depth == 0 or action.name != "fail":
+            return action
+        return AgentAction(
+            name="fail",
+            arguments={},
+            thought=sanitize_subagent_error(action.thought),
+            message=sanitize_subagent_error(action.message),
         )
 
     async def _emit_terminal_error(self, terminal_note: str) -> str:

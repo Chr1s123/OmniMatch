@@ -188,9 +188,11 @@ class SubAgentPayload(BaseModel):
     step_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
-    def validate_failed_error(self) -> "SubAgentPayload":
+    def validate_status_error(self) -> "SubAgentPayload":
         if self.status == "failed" and not self.error:
             raise ValueError("failed sub-agent payload requires an error")
+        if self.status == "completed" and self.error is not None:
+            raise ValueError("completed sub-agent payload cannot include an error")
         return self
 
 

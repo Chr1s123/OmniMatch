@@ -240,6 +240,27 @@ class TerminalFailForkLLMProvider(ForkAwareLLMProvider):
         return await super().plan_next_action(messages)
 
 
+class SecretTerminalFailForkLLMProvider(ForkAwareLLMProvider):
+    sentinel = "child-leak-sentinel"
+
+    async def plan_next_action(self, messages: list[dict]) -> ProviderResult[dict]:
+        system_prompt = str(messages[0].get("content", "")) if messages else ""
+        if not system_prompt.startswith("Extract shopping intent"):
+            state = json.loads(messages[1]["content"])
+            if state["query"] == "child-amazon":
+                return ProviderResult(
+                    provider="secret_terminal_fail_fork_llm",
+                    provider_mode="fake",
+                    latency_ms=1,
+                    data={
+                        "action": "fail",
+                        "thought": f"Child saw token={self.sentinel}",
+                        "message": f"Child failed with password={self.sentinel}",
+                    },
+                )
+        return await super().plan_next_action(messages)
+
+
 class NestedForkLLMProvider(SequenceLLMProvider):
     def __init__(self) -> None:
         super().__init__([])
@@ -513,6 +534,23 @@ async def test_fork_executor_preserves_typed_failed_payload_data():
     assert result.result == {"summary": {"status_note": "Child could not satisfy objective."}}
     assert result.observations == [{"tool": "AgentPlanner"}]
     assert result.step_count == 1
+
+
+def test_subagent_payload_rejects_failed_without_error():
+    with pytest.raises(ValueError, match="failed sub-agent payload requires an error"):
+        SubAgentPayload(status="failed", result={})
+
+
+def test_subagent_payload_rejects_completed_with_error():
+    with pytest.raises(ValueError, match="completed sub-agent payload cannot include an error"):
+        SubAgentPayload(status="completed", error="unexpected", result={})
+
+
+def test_subagent_payload_defaults_to_completed_without_error():
+    payload = SubAgentPayload(result={})
+
+    assert payload.status == "completed"
+    assert payload.error is None
 
 
 @pytest.mark.asyncio
@@ -1143,6 +1181,56 @@ async def test_child_terminal_fail_is_scoped_and_returns_failed_result(tmp_path)
     assert child_errors[0].payload["subagent_id"] == "amazon"
     assert child_errors[0].payload["fork_depth"] == 1
     assert not [event for event in monitor.events if event.type == "task_error"]
+
+
+@pytest.mark.asyncio
+async def test_child_terminal_fail_is_sanitized_before_every_event_and_artifact(tmp_path):
+    settings = submission_settings()
+    base = ProviderRegistry.from_settings(settings)
+    llm = SecretTerminalFailForkLLMProvider()
+    providers = ProviderRegistry(
+        llm=llm,
+        product=base.product,
+        web_search=base.web_search,
+        shipping=base.shipping,
+    )
+    monitor = EventCollector(thread_id="thread_child_terminal_redaction")
+    loop = CompetitionAgentLoop(
+        thread_id="thread_child_terminal_redaction",
+        session_dir=tmp_path,
+        settings=settings,
+        providers=providers,
+        monitor=monitor,
+    )
+
+    await loop.run("parent")
+
+    child_events = [
+        event
+        for event in monitor.events
+        if event.payload.get("subagent_id") == "amazon"
+        or (event.payload.get("task_id") == "amazon" and event.payload.get("fork_depth") == 1)
+    ]
+    child_trace = (tmp_path / "subagents" / "amazon" / "trace.jsonl").read_text(encoding="utf-8")
+    child_summary = (tmp_path / "subagents" / "amazon" / "summary.json").read_text(encoding="utf-8")
+    finished_payload = next(
+        event.payload for event in child_events if event.type == "subagent_finished"
+    )
+    parent_fork_observation = next(
+        observation for observation in loop.last_observations if observation["tool"] == "fork"
+    )
+
+    assert child_events
+    assert any(event.type == "thought" and "[REDACTED]" in event.message for event in child_events)
+    for event in child_events:
+        assert llm.sentinel not in event.model_dump_json()
+    for artifact in (
+        child_trace,
+        child_summary,
+        json.dumps(finished_payload),
+        json.dumps(parent_fork_observation),
+    ):
+        assert llm.sentinel not in artifact
 
 
 @pytest.mark.asyncio
