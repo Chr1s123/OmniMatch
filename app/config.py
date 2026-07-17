@@ -62,13 +62,9 @@ class OmniMatchSettings:
             raise ConfigError("OMNIMATCH_PROFILE must be dev, submission, or test")
         fork_limits = {
             "max_fork_depth": _env_int("OMNIMATCH_MAX_FORK_DEPTH", 1),
-            "max_parallel_subagents": _env_int(
-                "OMNIMATCH_MAX_PARALLEL_SUBAGENTS", 4
-            ),
+            "max_parallel_subagents": _env_int("OMNIMATCH_MAX_PARALLEL_SUBAGENTS", 4),
             "subagent_max_steps": _env_int("OMNIMATCH_SUBAGENT_MAX_STEPS", 4),
-            "subagent_timeout_seconds": _env_float(
-                "OMNIMATCH_SUBAGENT_TIMEOUT_SECONDS", 30.0
-            ),
+            "subagent_timeout_seconds": _env_float("OMNIMATCH_SUBAGENT_TIMEOUT_SECONDS", 30.0),
         }
 
         if profile == "submission":
