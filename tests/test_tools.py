@@ -170,6 +170,36 @@ async def test_tool_registry_rejects_tools_outside_child_allowlist():
 
 
 @pytest.mark.asyncio
+async def test_tool_registries_isolate_state_and_rejected_action_state():
+    settings = submission_settings()
+    providers = ProviderRegistry.from_settings(settings)
+    first = ToolRegistry(
+        ToolContext(settings=settings, providers=providers),
+        allowed_tools=frozenset({"plan"}),
+    )
+    second = ToolRegistry(
+        ToolContext(settings=settings, providers=providers),
+        allowed_tools=frozenset({"plan"}),
+    )
+
+    await first.run("plan", {"query": "旅行三件套"})
+
+    assert first.snapshot()["has_intent"] is True
+    assert second.snapshot() == {
+        "has_intent": False,
+        "has_insight": False,
+        "candidate_count": 0,
+        "scored_count": 0,
+        "top_score": None,
+    }
+
+    state_before_rejection = first.snapshot()
+    with pytest.raises(PermissionError, match="item_search"):
+        await first.run("item_search", {})
+    assert first.snapshot() == state_before_rejection
+
+
+@pytest.mark.asyncio
 async def test_pick_items_skips_missing_urls_and_backfills_from_later_candidates():
     settings = OmniMatchSettings(
         profile="submission",

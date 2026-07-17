@@ -209,6 +209,27 @@ async def test_scoped_event_collector_enriches_child_events():
     }
 
 
+@pytest.mark.asyncio
+async def test_scoped_event_collector_scope_keys_override_event_payload():
+    parent = EventCollector(thread_id="thread_scope_conflict")
+    child = ScopedEventCollector(
+        parent,
+        {"subagent_id": "amazon", "fork_depth": 1},
+    )
+
+    await child.emit(
+        "tool_start",
+        "search",
+        tool="item_search",
+        payload={"subagent_id": "parent", "fork_depth": 0},
+    )
+
+    assert parent.events[-1].payload == {
+        "subagent_id": "amazon",
+        "fork_depth": 1,
+    }
+
+
 def test_agent_scope_context_snapshot_is_read_only():
     scope = AgentScope(context_snapshot={"platform": "Amazon"})
 
