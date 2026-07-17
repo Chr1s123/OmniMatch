@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping as MappingABC
 from copy import deepcopy
 from dataclasses import dataclass, field
+import math
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
@@ -15,13 +16,31 @@ from app.config import OmniMatchSettings
 SubAgentStatus = Literal["completed", "failed", "cancelled", "timed_out"]
 
 
+def _validate_context_snapshot(value: Any, path: str = "$") -> None:
+    if isinstance(value, MappingABC):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"context_snapshot at {path} keys must be strings")
+            _validate_context_snapshot(item, f"{path}.{key}")
+        return
+    if isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            _validate_context_snapshot(item, f"{path}[{index}]")
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"context_snapshot at {path} is not JSON-compatible: non-finite float")
+    if value is None or isinstance(value, str | int | float | bool):
+        return
+    raise ValueError(
+        f"context_snapshot at {path} is not JSON-compatible: {type(value).__name__}"
+    )
+
+
 def _freeze_context(value: Any) -> Any:
     if isinstance(value, MappingABC):
         return MappingProxyType({key: _freeze_context(item) for key, item in value.items()})
     if isinstance(value, list | tuple):
         return tuple(_freeze_context(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return frozenset(_freeze_context(item) for item in value)
     return value
 
 
@@ -31,9 +50,7 @@ def thaw_context_snapshot(value: Any) -> Any:
         return {key: thaw_context_snapshot(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return [thaw_context_snapshot(item) for item in value]
-    if isinstance(value, frozenset):
-        return [thaw_context_snapshot(item) for item in value]
-    return deepcopy(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -45,6 +62,7 @@ class AgentScope:
     context_snapshot: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        _validate_context_snapshot(self.context_snapshot)
         object.__setattr__(self, "context_snapshot", _freeze_context(deepcopy(dict(self.context_snapshot))))
 
 
@@ -64,6 +82,12 @@ class ForkRequest(BaseModel):
         if unknown:
             raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
         return list(dict.fromkeys(value))
+
+    @field_validator("context_snapshot", mode="before")
+    @classmethod
+    def validate_context_snapshot(cls, value: Any) -> Any:
+        _validate_context_snapshot(value)
+        return value
 
     @classmethod
     def parse_many(

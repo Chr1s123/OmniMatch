@@ -210,13 +210,43 @@ def test_agent_scope_context_snapshot_is_recursively_read_only():
         scope.context_snapshot["platforms"].append("eBay")
 
 
-def test_thaw_context_snapshot_returns_mutable_serialization_copy():
-    scope = AgentScope(context_snapshot={"platforms": ["Amazon"], "tags": {"travel"}})
+def test_thaw_context_snapshot_returns_mutable_json_safe_copy():
+    scope = AgentScope(context_snapshot={"platforms": ["Amazon"], "tags": ["travel"]})
 
     snapshot = thaw_context_snapshot(scope.context_snapshot)
     snapshot["platforms"].append("eBay")
 
     assert snapshot == {"platforms": ["Amazon", "eBay"], "tags": ["travel"]}
+    assert json.dumps(snapshot)
+
+
+@pytest.mark.parametrize("invalid_value", [bytearray(b"unsafe"), {"travel"}])
+def test_agent_scope_rejects_non_json_snapshot_values(invalid_value):
+    with pytest.raises(ValueError, match="context_snapshot.*not JSON-compatible"):
+        AgentScope(context_snapshot={"nested": {"value": invalid_value}})
+
+
+def test_agent_scope_rejects_non_string_context_keys():
+    with pytest.raises(ValueError, match="context_snapshot.*keys must be strings"):
+        AgentScope(context_snapshot={1: "Amazon"})
+
+
+def test_fork_request_rejects_non_json_snapshot_value():
+    with pytest.raises(ValueError, match="context_snapshot.*not JSON-compatible"):
+        ForkRequest.parse_many(
+            {
+                "tasks": [
+                    {
+                        "task_id": "amazon",
+                        "objective": "Search Amazon",
+                        "allowed_tools": ["plan"],
+                        "context_snapshot": {"nested": {"value": bytearray(b"unsafe")}},
+                        "merge_key": "products",
+                    }
+                ]
+            },
+            submission_settings(),
+        )
 
 
 @pytest.mark.asyncio
